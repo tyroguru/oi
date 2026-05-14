@@ -1441,18 +1441,27 @@ bool OIDebugger::functionPatch(const prequest& req) {
     trapType tType =
         req.type == "return" ? OID_TRAP_VECT_ENTRYRET : OID_TRAP_VECT_ENTRY;
     uintptr_t trapAddr = fd->ranges[0].start;
+    /*
+     * This code below isn't correct and breaks tests on ubuntu 24.04. with
+     * clang 16.0.6 . I'm commenting it out and not removing it so that it's
+     * obvious when I come back to fix the problem when it, no doubt,
+     * reappears.
+     */
+#if 0
     if (req.args[0].starts_with("arg") || req.args[0] == "this") {
       auto* argument =
           dynamic_cast<FuncDesc::Arg*>(fd->getArgument(req.args[0]).get());
+
       if (argument->locator.locations_size > 0) {
         /*
          * The `std::max` is necessary because sometimes when a binary is
          * compiled in debug-mode, the compiler will state that the variable
          * becomes live at address 0, which is clearly not what we want.
          */
-        trapAddr = std::max(trapAddr, argument->locator.locations[0].start);
+        trapAddr = std::max(trapAddr, argument->locator.locations[0].start); 
       }
     }
+#endif
     tiVec.push_back(
         std::make_shared<trapInfo>(tType, trapAddr, segConfig.textSegBase));
   }
