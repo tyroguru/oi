@@ -379,6 +379,7 @@ target_link_libraries(treebuilder
 )
 
 
+include(GNUInstallDirs)
 
 ## OI Outputs
 ### Object Introspection as a Library (OIL)
@@ -386,8 +387,35 @@ add_library(oil
   oi/IntrospectionResult.cpp
   oi/exporters/ParsedData.cpp
 )
-target_link_libraries(oil folly_headers)
-target_include_directories(oil PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# target_link_libraries(oil
+#  PRIVATE folly_headers
+#)
+
+target_include_directories(oil
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  )
+
+install(
+  TARGETS oil
+  EXPORT oilTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(
+  DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(
+  EXPORT oilTargets
+  NAMESPACE oil::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/oil
+)
 
 add_library(oil_jit
   oi/OILibrary.cpp
@@ -454,4 +482,3 @@ if (DEFINED ENV{CMAKE_HOOK})
 endif()
 
 install(TARGETS oid DESTINATION ${CMAKE_INSTALL_BINDIR})
-
