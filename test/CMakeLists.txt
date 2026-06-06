@@ -139,3 +139,40 @@ endif()
 
 include_directories("${PROJECT_SOURCE_DIR}/extern/drgn/build")
 add_subdirectory("integration")
+
+add_test(
+  NAME oil_install_smoke_configure
+  COMMAND ${CMAKE_COMMAND}
+    -S ${CMAKE_CURRENT_SOURCE_DIR}/install_smoke
+    -B ${CMAKE_CURRENT_BINARY_DIR}/install_smoke_build
+    -G Ninja
+    -DCMAKE_PREFIX_PATH=${CMAKE_INSTALL_PREFIX}
+)
+
+add_test(
+  NAME oil_install_smoke_build
+  COMMAND ${CMAKE_COMMAND}
+    --build ${CMAKE_CURRENT_BINARY_DIR}/install_smoke_build
+)
+
+set_tests_properties(oil_install_smoke_build PROPERTIES
+  DEPENDS oil_install_smoke_configure
+)
+
+add_test(
+  NAME oil_install_smoke_run_static
+  COMMAND ${CMAKE_CURRENT_BINARY_DIR}/install_smoke_build/oil_static_smoke
+)
+
+add_test(
+  NAME oil_install_smoke_run_shared
+  COMMAND ${CMAKE_CURRENT_BINARY_DIR}/install_smoke_build/oil_shared_smoke
+)
+
+set_tests_properties(oil_install_smoke_run_static PROPERTIES
+  DEPENDS oil_install_smoke_build
+)
+
+set_tests_properties(oil_install_smoke_run_shared PROPERTIES
+  DEPENDS oil_install_smoke_build
+)
