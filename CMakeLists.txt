@@ -442,11 +442,42 @@ install(
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/oil
 )
 
-add_library(oil_jit
+add_library(oil_jit_static STATIC
   oi/OILibrary.cpp
   oi/OILibraryImpl.cpp
 )
-target_link_libraries(oil_jit oicore oil_static)
+# target_link_libraries(oil_jit oicore oil_static)
+
+add_library(oil_jit_shared SHARED
+  oi/OILibrary.cpp
+  oi/OILibraryImpl.cpp
+)
+
+set_target_properties(oil_jit_static PROPERTIES OUTPUT_NAME oil_jit)
+set_target_properties(oil_jit_shared PROPERTIES OUTPUT_NAME oil_jit)
+
+foreach(target oil_jit_static oil_jit_shared)
+  target_include_directories(${target}
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  )
+endforeach()
+
+target_link_libraries(oil_jit_static PRIVATE oicore oil_static)
+target_link_libraries(oil_jit_shared PRIVATE oicore oil_shared)
+
+install(
+  TARGETS oil_jit_shared
+  EXPORT oilTargets
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(
+  TARGETS oil_jit_static
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
 
 ### Object Introspection as a Library Generator (OILGen)
 add_executable(oilgen
@@ -495,7 +526,8 @@ endif()
 ### Custom link options
 if (STATIC_LINK)
   target_link_libraries(oicore -static)
-  target_link_libraries(oil -static)
+  target_link_libraries(oil_static -static)
+  target_link_libraries(oil_jit_static -static)
   target_link_libraries(oip -static)
   target_link_libraries(oid -static)
   target_link_libraries(oitb -static)
