@@ -404,6 +404,25 @@ foreach(target oil_static oil_shared)
   )
 endforeach()
 
+include(CMakePackageConfigHelpers)
+
+configure_package_config_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/oilConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/oilConfig.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/oil
+)
+
+install(
+  FILES ${CMAKE_CURRENT_BINARY_DIR}/oilConfig.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/oil
+)
+
+#target_include_directories(oil
+#  PUBLIC
+#    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+#    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+#)
+
 install(
   TARGETS oil_static oil_shared
   EXPORT oilTargets
@@ -488,3 +507,16 @@ if (DEFINED ENV{CMAKE_HOOK})
 endif()
 
 install(TARGETS oid DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+include(CMakePackageConfigHelpers)
+
+configure_package_config_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/oilConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/oilConfig.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/oil
+)
+
+install(
+  FILES ${CMAKE_CURRENT_BINARY_DIR}/oilConfig.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/oil
+)
