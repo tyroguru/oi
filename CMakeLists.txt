@@ -382,24 +382,30 @@ target_link_libraries(treebuilder
 include(GNUInstallDirs)
 
 ## OI Outputs
-### Object Introspection as a Library (OIL)
-add_library(oil
+### Object Introspection as a Static Library (OIL)
+add_library(oil_static STATIC
   oi/IntrospectionResult.cpp
   oi/exporters/ParsedData.cpp
 )
 
-# target_link_libraries(oil
-#  PRIVATE folly_headers
-#)
+add_library(oil_shared SHARED
+  oi/IntrospectionResult.cpp
+  oi/exporters/ParsedData.cpp
+)
 
-target_include_directories(oil
-  PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+set_target_properties(oil_static PROPERTIES OUTPUT_NAME oil)
+set_target_properties(oil_shared PROPERTIES OUTPUT_NAME oil)
+
+foreach(target oil_static oil_shared)
+  target_include_directories(${target}
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   )
+endforeach()
 
 install(
-  TARGETS oil
+  TARGETS oil_static oil_shared
   EXPORT oilTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -421,7 +427,7 @@ add_library(oil_jit
   oi/OILibrary.cpp
   oi/OILibraryImpl.cpp
 )
-target_link_libraries(oil_jit oicore oil)
+target_link_libraries(oil_jit oicore oil_static)
 
 ### Object Introspection as a Library Generator (OILGen)
 add_executable(oilgen
