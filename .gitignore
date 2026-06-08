@@ -13,6 +13,7 @@ Testing
 PADDING
 failed
 website/node_modules
+CMakeUserPresets.json
 
 ## Vim
 *.swp
