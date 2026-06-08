@@ -26,8 +26,8 @@ int main() {
   };
 
   static constexpr std::array<oi::exporters::inst::Field, 0> fields = {};
-  static constexpr std::array<oi::exporters::inst::ProcessorInst, 0> processors =
-      {};
+  static constexpr std::array<oi::exporters::inst::ProcessorInst, 0>
+      processors = {};
 
   static constexpr oi::exporters::inst::Field root{
       sizeof(std::uint64_t),
