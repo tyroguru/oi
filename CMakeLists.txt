@@ -218,14 +218,19 @@ find_package(Boost REQUIRED COMPONENTS
 )
 message(STATUS "Linking Boost libraries: ${Boost_LIBRARIES}")
 
+# NOTE: the zstd find_package below may well not be required as it is
+# here purely as an LLVM16 dependency issue. Recheck.
+find_package(zstd REQUIRED CONFIG)
+
 ### LLVM and Clang
+# find_package(zstd REQUIRED CONFIG)
 find_package(LLVM ${LLVM_REQUESTED_VERSION} REQUIRED CONFIG)
 
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
 if((${LLVM_VERSION_MAJOR} VERSION_LESS 15) OR (${LLVM_VERSION_MAJOR} VERSION_GREATER 16))
-  message(SEND_ERROR "Object Introspection currently requires an LLVM version between 15 and 16!")
+  message(FATAL_ERROR "Object Introspection currently requires an LLVM version between 15 and 16!")
 endif()
 
 find_package(Clang REQUIRED CONFIG)
