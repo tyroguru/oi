@@ -469,8 +469,18 @@ foreach(target oil_jit_static oil_jit_shared)
   )
 endforeach()
 
-target_link_libraries(oil_jit_static PRIVATE oicore oil_static)
-target_link_libraries(oil_jit_shared PRIVATE oicore oil_shared)
+target_link_libraries(oil_jit_static
+  PRIVATE
+    oicore
+    oil_static
+)
+
+target_link_libraries(oil_jit_shared
+  PUBLIC
+    oil_shared
+  PRIVATE
+    oicore
+)
 
 install(
   TARGETS oil_jit_shared
