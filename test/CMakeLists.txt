@@ -176,3 +176,5 @@ set_tests_properties(oil_install_smoke_run_static PROPERTIES
 set_tests_properties(oil_install_smoke_run_shared PROPERTIES
   DEPENDS oil_install_smoke_build
 )
+
+add_subdirectory(oil)
