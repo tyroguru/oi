@@ -1,0 +1,18 @@
+This directory contains a smoke test example of OIL usage which links
+against the liboil-jit.so shared library. liboil-jit.so contains the full OI
+stack and uses a JIT compiler approach (as opposed to the AoT approach that
+OIL also implements). It is designed to be used out-of-tree and therefore
+can be classified as standalone. It does however require a configuration
+bundle to be built previously (see comment in the code).
+
+Usage
+=====
+
+1. First, ensure oil libraries have been installed from OI repo:
+  $ cmake -G Ninja -B build -DCMAKE_INSTALL_PREFIX=/tmp/oil-install -DFORCE_BOOST_STATIC=Off
+  $ ninja -C build install
+
+2. Build and run the test application (inside or outside the OI tree):
+  $ cmake -G Ninja -B build-smoke -DCMAKE_PREFIX_PATH=/tmp/oil-install
+  $ cmake --build build-smoke
+  $ ./build-smoke/oil_jit_smoke
