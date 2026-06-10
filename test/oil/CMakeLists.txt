@@ -97,12 +97,9 @@ add_oil_api_test(oil_plain_struct
   oil_plain_struct.cpp
 )
 
-# Add these as the source files land.
-#
-# add_oil_api_test(oil_02_nested_struct
-#   oil_nested_struct.cpp
-# )
-#
+add_oil_api_test(oil_nested_struct
+  oil_nested_struct.cpp
+)
 # add_oil_api_test(oil_03_unique_ptr_tree
 #   oil_unique_ptr_tree.cpp
 # )
