@@ -86,6 +86,11 @@ function(add_oil_api_test target source)
     NAME ${target}
     COMMAND $<TARGET_FILE:${target}>
   )
+
+  set_tests_properties(${target}
+    PROPERTIES
+      LABELS "oil"
+  )
 endfunction()
 
 add_oil_api_test(oil_plain_struct
