@@ -46,11 +46,6 @@ function(add_oil_api_test target source)
     oil_api_test_config
   )
 
-  target_link_libraries(${target}
-    PRIVATE
-      ${OIL_API_TEST_LINK_TARGET}
-  )
-
   target_compile_definitions(${target}
     PRIVATE
       OIL_TEST_CONFIG_PATH="${OIL_API_TEST_CONFIG_PATH}"
