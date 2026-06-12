@@ -157,22 +157,22 @@ class Pair {
   Pair(DataBuffer db) : _buf(db) {
   }
 
-  template <class U>
-  T2 write(U val) {
-    Unit<DataBuffer> second = T1(_buf).write(val);
-    return second.template cast<T2>();
+  template <typename Value>
+  T2 write(Value value) {
+    Unit<DataBuffer> finishedFirstPart = T1(_buf).write(value);
+    return finishedFirstPart.template cast<T2>();
   }
 
-  template <typename F>
-  T2 delegate(F const& cb) {
-    T1 first = T1(_buf);
-    Unit<DataBuffer> second = cb(first);
-    return second.template cast<T2>();
+  template <typename WriteFirstPart>
+  T2 delegate(WriteFirstPart const& writeFirstPart) {
+    T1 firstPart = T1(_buf);
+    Unit<DataBuffer> finishedFirstPart = writeFirstPart(firstPart);
+    return finishedFirstPart.template cast<T2>();
   }
 
-  template <typename F>
-  Unit<DataBuffer> consume(F const& cb) {
-    return cb(*this);
+  template <typename ConsumePair>
+  Unit<DataBuffer> consume(ConsumePair const& consumePair) {
+    return consumePair(*this);
   }
 
 #ifdef DEFINE_DESCRIBE
