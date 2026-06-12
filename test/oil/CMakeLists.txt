@@ -100,6 +100,10 @@ add_oil_api_test(oil_plain_struct
 add_oil_api_test(oil_nested_struct
   oil_nested_struct.cpp
 )
+
+add_oil_api_test(oil_vector_leaf_structs
+  oil_vector_leaf_structs.cpp
+)
 # add_oil_api_test(oil_03_unique_ptr_tree
 #   oil_unique_ptr_tree.cpp
 # )
@@ -110,10 +114,6 @@ add_oil_api_test(oil_nested_struct
 #
 # add_oil_api_test(oil_05_vector_of_objects
 #   oil_vector_of_objects.cpp
-# )
-#
-# add_oil_api_test(oil_06_vector_of_pointers
-#   oil_vector_of_pointers.cpp
 # )
 #
 # add_oil_api_test(oil_07_map_unordered_map
