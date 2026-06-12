@@ -19,42 +19,124 @@
 /*
  * Static Types
  *
- * OI employs a data segment to transfer information about the probed object to
- * the debugger. Static Types are used with the `-ftyped-data-segment` feature
- * to provide a compile time description of the contents of this data segment.
+ * Static types describe the shape of the data stream written by generated OI
+ * traversal code. They are not C++ object-layout descriptions. Instead, they
+ * form a small compile-time protocol for writing typed data into a DataBuffer.
  *
- * DataBuffer represents any type with two methods: `void write_byte(uint8_t)`,
- * which writes a given byte to the buffer; and, `size_t offset()`, which
- * returns the number of bytes written. Each Static Type holds a DataBuffer
- * which describes where to write data, and has no other fields. DataBuffers
- * should remain pointer sized enabling trivial copies.
  *
- * Writing to an object of a given static type returns a different type which
- * has had that part written. When there is no more to write, the type will
- * return a Unit. There are two ways to write data from the JIT code into a
- * static type:
+ * A DataBuffer is any small, cheaply copyable object that provides the following
+ * methods:
  *
- * - .write(): This works if you can write an entire object from one input. For
- *              example, VarInt::write(0) returns a Unit, and
- *              Pair<VarInt, VarInt>::write(0) returns a VarInt.
+ *    void write_byte(uint8_t);
+ *    size_t offset();
  *
- * - .delegate(): This handles the remainder of the cases where you need to do
- *              something more complicated. For example:
- *              ```
- *              using ComplexType = Pair<VarInt, VarInt>;
- *              Pair<ComplexType, VarInt>::delegate([](auto ret) {
- *               return ret.write(0).write(1);
- *              }).write(2);
- *              ```
- *              In this case, `ret` is of type `ComplexType`. After the two
- *              writes, the inner function returns `Unit`. Delegate then
- *              internally converts this unit to a `VarInt`.
+ * Each static type stores only a DataBuffer. The type itself represents the
+ * current write state: "what kind of data is expected next, and what remains
+ * after that data has been written".
  *
- * DEFINE_DESCRIBE controls the additional feature of dynamic descriptions of
- * types. If defined when this header is included, static types provide a
- * dynamic description of their type as the constexpr field `describe`. Compound
- * types compose appropriately.
+ * The key idea is that writing advances the static type. A write does not
+ * mutate the type object in-place from the caller's point of view; it returns a
+ * new static type representing the remaining unwritten stream.
+ *
+ * For example, given the stream shape:
+ *
+ *    Pair<DB, VarInt<DB>, VarInt<DB>>
+ *
+ * the first write consumes the first VarInt and returns the remaining VarInt:
+ *
+ *    auto second = pair.write(10);
+ *
+ * The second write consumes that remaining VarInt and returns Unit:
+ *
+ *    auto done = pair.write(10).write(20);
+ *
+ * Unit means "this part of the stream is complete" or "there is no interesting
+ * data to write for this part". Pair uses Unit internally as the hand-off point
+ * between the completed first part and the remaining second part.
+ *
+ * The primitive stream type is:
+ *
+ * VarInt<DB>
+ * ----------
+ *
+ * VarInt writes one unsigned integer value using variable-length encoding and
+ * then returns Unit.
+ *
+ * The compound stream types are:
+ *
+ *    Pair<DB, First, Rest>
+ *
+ * A sequence. First is written before Rest. Pair is used recursively to
+ * represent longer sequences:
+ *
+ *    Pair<DB, A, Pair<DB, B, C>>
+ *
+ * describes the stream A, then B, then C.
+ *
+ * Sum<DB, Alternatives...>
+ * ------------------------
+ *
+ * Sum is a tagged union. Sum::write<I>() first writes the selected alternative
+ * index I as a VarInt, then returns the static type for that selected
+ * alternative so its payload can be written.
+ *
+ * List<DB, Element>
+ * -----------------
+ *
+ * List is a length-prefixed sequence. The list first writes its length, then
+ * exposes a ListContents<Element> state for writing each element.
+ *
+ * There are three ways to advance a static type:
+ *
+ *    .write(value)
+ *
+ * Use this when the current first component can be fully written from one
+ * value. For example:
+ *
+ *    Pair<DB, VarInt<DB>, VarInt<DB>> pair{db};
+ *
+ *    pair.write(length).write(capacity);
+ *
+ * The values passed to write() are payload values written into the data
+ * stream; they are not positions or indexes.
+ *
+ *    .delegate(callback)
+ *
+ * Use delegate when the current first component is itself compound and needs
+ * multiple operations to write. The callback receives the first component
+ * and must consume it completely, returning Unit. delegate() then converts
+ * that Unit into the remaining type.
+ *
+ * For example:
+ *    using Header = Pair<DB, VarInt<DB>, VarInt<DB>>;
+ *    using Stream = Pair<DB, Header, VarInt<DB>>;
+ *
+ *    Stream stream{db};
+ *    stream.delegate([&](auto header) {
+ *      return header.write(length).write(capacity);
+ *    }).write(flags);
+ *
+ * Here the callback consumes Header and returns Unit. delegate() converts
+ * that completed Header into the remaining VarInt<DB>, allowing flags to be
+ * written next.
+ *
+ *    .consume(callback)
+ *
+ * Use this at the end of a generated write chain, or when the caller wants
+ * the callback to consume the entire current static type. The callback is
+ * given the current type and must return Unit.
+ *
+ * This design lets generated code express the stream shape in the C++ type
+ * system. If generated code writes too little, writes too much, or writes the
+ * wrong part of a compound shape, the error is usually caught as a compile-time
+ * type mismatch rather than as a later decoding error.
+ *
+ * DEFINE_DESCRIBE enables the runtime mirror of these static types. When it is
+ * defined, each static type exposes a constexpr `describe` value from
+ * oi::types::dy. The dynamic description is used by the reader side to decode
+ * the byte stream with the same shape that the writer used.
  */
+
 namespace oi::types::st {
 
 #ifdef DEFINE_DESCRIBE
