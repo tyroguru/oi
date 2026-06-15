@@ -24,8 +24,8 @@
  * form a small compile-time protocol for writing typed data into a DataBuffer.
  *
  *
- * A DataBuffer is any small, cheaply copyable object that provides the following
- * methods:
+ * A DataBuffer is any small, cheaply copyable object that provides the
+ * following methods:
  *
  *    void write_byte(uint8_t);
  *    size_t offset();

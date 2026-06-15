@@ -46,7 +46,7 @@ void printStringViewSpan(std::span<const std::string_view> values) {
 bool typePathContains(const oi::result::Element& element,
                       std::string_view name) {
   return std::find(element.type_path.begin(), element.type_path.end(), name) !=
-      element.type_path.end();
+         element.type_path.end();
 }
 
 void printElement(const oi::result::Element& element) {
@@ -86,6 +86,7 @@ int main() {
     oi::GeneratorOptions opts;
     opts.debugLevel = 0;
     opts.configFilePaths.emplace_back(OIL_TEST_CONFIG_PATH);
+    opts.sourceFileDumpPath = "/tmp/oil_jit_dump.cpp";
 
     const auto result = oi::setupAndIntrospect(object, opts);
 
