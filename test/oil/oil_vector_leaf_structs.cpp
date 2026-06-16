@@ -46,7 +46,7 @@ void printStringViewSpan(std::span<const std::string_view> values) {
 bool typePathContains(const oi::result::Element& element,
                       std::string_view name) {
   return std::find(element.type_path.begin(), element.type_path.end(), name) !=
-      element.type_path.end();
+         element.type_path.end();
 }
 
 void printElement(const oi::result::Element& element) {
@@ -60,13 +60,64 @@ void printElement(const oi::result::Element& element) {
               << " capacity=" << element.container_stats->capacity;
   }
 
+  if (!element.va_intervals.empty()) {
+    std::cout << " num_intervals: " << element.va_intervals.size();
+  }
+
   std::cout << " type_path=";
   printStringViewSpan(element.type_path);
 
   std::cout << " type_names=";
   printStringViewSpan(element.type_names);
 
+  std::cout << " va_intervals=[";
+
+  bool firstInterval = true;
+  for (const auto& interval : element.va_intervals) {
+    if (!firstInterval) {
+      std::cout << ", ";
+    }
+
+    const auto end = interval.base + interval.size;
+
+    std::cout << '[' << std::showbase << std::hex << interval.base << ", "
+              << end << std::dec << std::noshowbase << ")"
+              << " size=" << interval.size;
+
+    firstInterval = false;
+  }
+
+  std::cout << ']';
+
   std::cout << '\n';
+}
+
+void printLeavesStorage(const Root& object) {
+  const auto& leaves = object.leaves;
+
+  std::cout << "Root object address:          "
+            << static_cast<const void*>(&object) << '\n';
+
+  std::cout << "Root::leaves vector address:  "
+            << static_cast<const void*>(&leaves) << '\n';
+
+  std::cout << "Root::leaves.data() address:  "
+            << static_cast<const void*>(leaves.data()) << '\n';
+
+  std::cout << "Root::leaves size:            " << leaves.size() << '\n'
+            << "Root::leaves capacity:        " << leaves.capacity() << '\n'
+            << "sizeof(Leaf):                 " << sizeof(Leaf) << '\n';
+
+  for (std::size_t i = 0; i < leaves.size(); ++i) {
+    const Leaf& leaf = leaves[i];
+
+    std::cout << "leaves[" << i << "]"
+              << " object_address=" << static_cast<const void*>(&leaf)
+              << " value_address=" << static_cast<const void*>(&leaf.value)
+              << " enabled_address=" << static_cast<const void*>(&leaf.enabled)
+              << " value=" << leaf.value << " enabled=" << std::boolalpha
+              << leaf.enabled << '\n';
+  }
 }
 
 }  // namespace
@@ -82,6 +133,10 @@ int main() {
                 Leaf{.value = 30, .enabled = true},
             },
     };
+
+    object.leaves.reserve(1000);
+
+    printLeavesStorage(object);
 
     oi::GeneratorOptions opts;
     opts.debugLevel = 0;
