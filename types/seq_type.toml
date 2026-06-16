@@ -36,9 +36,37 @@ void getSizeType(const %1%<T, Allocator> &container, size_t& returnArg)
 """
 
 traversal_func = """
-auto tail = returnArg.write((uintptr_t)&container)
-                .write(container.capacity())
-                .write(container.size());
+auto tail = returnArg.delegate([&container](auto intervals) {
+  constexpr bool can_export_data_interval = !std::is_same_v<T0, bool>;
+
+  const bool has_data_interval =
+      can_export_data_interval && container.capacity() != 0;
+
+  auto contents = intervals.write(has_data_interval ? 2 : 1);
+
+  // Interval 1: the vector object itself.
+  contents = contents.delegate([&container](auto interval) {
+    return interval
+        .write(reinterpret_cast<uintptr_t>(&container))
+        .write(sizeof(container));
+  });
+
+  // Interval 2: the vector's backing storage, when representable.
+  if constexpr (can_export_data_interval) {
+    if (has_data_interval) {
+      contents = contents.delegate([&container](auto interval) {
+        return interval
+            .write(reinterpret_cast<uintptr_t>(container.data()))
+            .write(container.capacity() * sizeof(T0));
+      });
+    }
+  }
+
+  return contents.finish();
+})
+.write((uintptr_t)&container)
+.write(container.capacity())
+.write(container.size());
 
 // The double ampersand is needed otherwise this loop doesn't work with
 // vector<bool>
@@ -49,6 +77,30 @@ for (auto&& it : container) {
 }
 
 return tail.finish();
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
+func = """
+auto list = std::get<ParsedData::List>(d.val);
+
+el.va_intervals.clear();
+el.va_intervals.reserve(list.length);
+
+for (size_t i = 0; i < list.length; ++i) {
+  auto item = list.values();
+  auto pair = std::get<ParsedData::Pair>(item.val);
+
+  auto base = std::get<ParsedData::VarInt>(pair.first().val).value;
+  auto size = std::get<ParsedData::VarInt>(pair.second().val).value;
+
+  if (base != 0 && size != 0) {
+    el.va_intervals.push_back(result::Element::VAInterval{
+        .base = static_cast<uintptr_t>(base),
+        .size = static_cast<std::size_t>(size),
+    });
+  }
+}
 """
 
 [[codegen.processor]]

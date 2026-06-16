@@ -26,6 +26,12 @@
 namespace oi::result {
 
 struct Element {
+  // A half-open virtual-address interval: [base, base + size).
+  struct VAInterval {
+    uintptr_t base;
+    std::size_t size;
+  };
+
   struct ContainerStats {
     size_t capacity;
     size_t length;
@@ -39,6 +45,13 @@ struct Element {
   struct Scalar {
     uint64_t n;
   };
+
+  /*
+   * Virtual-address intervals directly occupied by this Element. Intervals
+   * are local to this Element and may overlap intervals reported by parent
+   * or child Elements.
+   */
+  std::vector<VAInterval> va_intervals;
 
   std::string_view name;
   std::span<const std::string_view> type_path;
