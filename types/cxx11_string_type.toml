@@ -52,13 +52,31 @@ class CaptureKeyHandler<Ctx, std::__cxx11::basic_string<CharT, Traits, Allocator
 """
 
 traversal_func = """
-    bool sso = isStorageInline(container);
+    const bool sso = isStorageInline(container);
+
+    const uintptr_t objectBase = reinterpret_cast<uintptr_t>(&container);
+    const uintptr_t dataBase =
+        sso ? 0 : reinterpret_cast<uintptr_t>(container.data());
+
+    const uint64_t objectIntervalSize =
+        static_cast<uint64_t>(sizeof(container));
+
+    const uint64_t dataIntervalSize =
+        sso ? 0 : static_cast<uint64_t>((container.capacity() + 1) * sizeof(T0));
 
     return returnArg.write(container.capacity())
         .write(sso)
-        .write(container.size());
+        .write(container.size())
+        .write(objectBase)
+        .write(objectIntervalSize)
+        .write(dataBase)
+        .write(dataIntervalSize);
 """
 
+# We could no doubt do this with some more compact typing with Pairs but
+# I'm experimenting with different styles - this one being a more readable
+# yet verbose container specification. Simple sequential VarInt's. I may
+# reimplement sometime using less processors.
 [[codegen.processor]]
 type = "types::st::VarInt<DB>"
 func = """
@@ -78,4 +96,60 @@ if (!sso)
 type = "types::st::VarInt<DB>"
 func = """
 el.container_stats->length = std::get<ParsedData::VarInt>(d.val).value;
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+
+// NOTE: This may seem to be unnecessary but it is vital owing to some suspect
+// ABI related issues we have see https://github.com/tyroguru/oi/issues/20.
+el.va_intervals.clear();
+el.va_intervals.reserve(3);
+
+uintptr_t base = static_cast<uintptr_t>(
+    std::get<ParsedData::VarInt>(d.val).value);
+
+if (base != 0) {
+  el.va_intervals.push_back(result::Element::VAInterval{
+      .base = base,
+      .size = 0,
+  });
+}
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+std::size_t size = static_cast<std::size_t>(
+    std::get<ParsedData::VarInt>(d.val).value);
+
+if (!el.va_intervals.empty()) {
+  el.va_intervals.back().size = size;
+}
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+uintptr_t base = static_cast<uintptr_t>(
+    std::get<ParsedData::VarInt>(d.val).value);
+
+if (base != 0) {
+  el.va_intervals.push_back(result::Element::VAInterval{
+      .base = base,
+      .size = 0,
+  });
+}
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+std::size_t size = static_cast<std::size_t>(
+    std::get<ParsedData::VarInt>(d.val).value);
+
+if (!el.va_intervals.empty() && el.va_intervals.back().size == 0) {
+  el.va_intervals.back().size = size;
+}
 """
