@@ -65,8 +65,8 @@ void PassManager::run(TypeGraph& typeGraph) {
 
   for (size_t i = 0; i < passes_.size(); i++) {
     auto& pass = passes_[i];
-    LOG(INFO) << "Running pass (" << i + 1 << "/" << passes_.size()
-              << "): " << pass.name();
+    VLOG(1) << "Running pass (" << i + 1 << "/" << passes_.size()
+            << "): " << pass.name();
     pass.run(typeGraph, tracker);
     VLOG(1) << separator;
     print(typeGraph, tracker);

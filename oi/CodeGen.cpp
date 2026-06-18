@@ -1314,9 +1314,9 @@ void CodeGen::transform(TypeGraph& typeGraph) {
 
   pm.run(typeGraph);
 
-  LOG(INFO) << "Sorted types:\n";
+  VLOG(1) << "Sorted types:\n";
   for (Type& t : typeGraph.finalTypes) {
-    LOG(INFO) << "  " << t.name() << std::endl;
+    VLOG(1) << "  " << t.name() << std::endl;
   };
 }
 
