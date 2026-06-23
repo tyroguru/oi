@@ -58,12 +58,15 @@ class IntrospectionResult {
         std::stack<exporters::inst::Inst, std::vector<exporters::inst::Inst>>;
 
     const_iterator(std::vector<uint8_t>::const_iterator data,
-                   exporters::inst::Inst type);
+                   exporters::inst::Inst type,
+                   std::optional<result::Element::VAInterval> root_va_interval);
     const_iterator(std::vector<uint8_t>::const_iterator data);
 
     std::vector<uint8_t>::const_iterator data_;
     stack_t stack_;
     std::optional<result::Element> next_;
+    std::optional<result::Element::VAInterval> root_va_interval_;
+    bool root_va_interval_pending_ = false;
 
     std::vector<std::string_view> type_path_;
     // Holds a pair of the type path entry this represents and the owned string
@@ -77,7 +80,10 @@ class IntrospectionResult {
     uint64_t increments_ = 0;
   };
 
-  IntrospectionResult(std::vector<uint8_t> buf, exporters::inst::Inst inst);
+  IntrospectionResult(std::vector<uint8_t> buf,
+                      exporters::inst::Inst inst,
+                      std::optional<result::Element::VAInterval>
+                          root_va_interval = std::nullopt);
 
   const_iterator begin() const;
   const_iterator cbegin() const;
@@ -88,6 +94,7 @@ class IntrospectionResult {
  private:
   std::vector<uint8_t> buf_;
   exporters::inst::Inst inst_;
+  std::optional<result::Element::VAInterval> root_va_interval_;
 };
 
 }  // namespace oi

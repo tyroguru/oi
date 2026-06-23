@@ -81,6 +81,11 @@ IntrospectionResult::const_iterator::operator++() {
                 .is_primitive = ty.is_primitive,
             });
 
+            if (root_va_interval_pending_) {
+              next_->va_intervals.push_back(*root_va_interval_);
+              root_va_interval_pending_ = false;
+            }
+
             for (const auto& [dy, handler] : ty.processors) {
               auto parsed = exporters::ParsedData::parse(data_, dy);
               handler(*next_, [this](auto i) { stack_.emplace(i); }, parsed);

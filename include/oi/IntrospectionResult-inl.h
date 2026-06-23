@@ -28,14 +28,21 @@ static_assert(false,
 
 namespace oi {
 
-inline IntrospectionResult::IntrospectionResult(std::vector<uint8_t> buf,
-                                                exporters::inst::Inst inst)
-    : buf_(std::move(buf)), inst_(inst) {
+inline IntrospectionResult::IntrospectionResult(
+    std::vector<uint8_t> buf,
+    exporters::inst::Inst inst,
+    std::optional<result::Element::VAInterval> root_va_interval)
+    : buf_(std::move(buf)), inst_(inst), root_va_interval_(root_va_interval) {
 }
 
 inline IntrospectionResult::const_iterator::const_iterator(
-    std::vector<uint8_t>::const_iterator data, exporters::inst::Inst type)
-    : data_(data), stack_({type}) {
+    std::vector<uint8_t>::const_iterator data,
+    exporters::inst::Inst type,
+    std::optional<result::Element::VAInterval> root_va_interval)
+    : data_(data),
+      stack_({type}),
+      root_va_interval_(root_va_interval),
+      root_va_interval_pending_(root_va_interval.has_value()) {
 }
 inline IntrospectionResult::const_iterator::const_iterator(
     std::vector<uint8_t>::const_iterator data)
@@ -45,7 +52,7 @@ inline IntrospectionResult::const_iterator IntrospectionResult::begin() const {
   return cbegin();
 }
 inline IntrospectionResult::const_iterator IntrospectionResult::cbegin() const {
-  auto it = const_iterator{buf_.cbegin(), inst_};
+  auto it = const_iterator{buf_.cbegin(), inst_, root_va_interval_};
   ++it;
   return it;
 }
