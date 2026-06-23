@@ -85,7 +85,13 @@ inline IntrospectionResult CodegenHandler<T, Fs...>::introspect(
   std::vector<uint8_t> buf;
   static_assert(sizeof(std::vector<uint8_t>) == 24);
   func(objectAddr, buf);
-  return IntrospectionResult{std::move(buf), *ty};
+  return IntrospectionResult{
+      std::move(buf),
+      *ty,
+      result::Element::VAInterval{
+          .base = reinterpret_cast<uintptr_t>(&objectAddr),
+          .size = sizeof(objectAddr),
+      }};
 }
 
 }  // namespace oi

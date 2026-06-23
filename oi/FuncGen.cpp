@@ -305,7 +305,10 @@ void FuncGen::DefineTopLevelIntrospectNamed(std::string& code,
   code += "(t, v);\n";
   code += "  return IntrospectionResult{std::move(v), treeBuilderInstructions";
   code += typeHash;
-  code += "};\n";
+  code +=
+      ", result::Element::VAInterval{"
+      ".base = reinterpret_cast<uintptr_t>(&t), "
+      ".size = sizeof(t)}};\n";
   code += "}\n";
 }
 

@@ -1,5 +1,6 @@
 #include <oi/oi.h>
 
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -34,6 +35,18 @@ void printStringViewSpan(std::span<const std::string_view> values) {
   }
 
   std::cout << ']';
+}
+
+bool hasInterval(const oi::result::Element& element,
+                 std::uintptr_t base,
+                 std::size_t size) {
+  for (const auto& interval : element.va_intervals) {
+    if (interval.base == base && interval.size == size) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 void printElementData(const oi::result::Element& element) {
@@ -75,6 +88,24 @@ void printElement(const oi::result::Element& element) {
   std::cout << " data=";
   printElementData(element);
 
+  std::cout << " intervals=" << element.va_intervals.size();
+  if (!element.va_intervals.empty()) {
+    std::cout << " va_ranges={";
+
+    bool firstInterval = true;
+    for (const auto& interval : element.va_intervals) {
+      if (!firstInterval) {
+        std::cout << ", ";
+      }
+
+      std::cout << "[0x" << std::hex << interval.base << ", 0x"
+                << interval.base + interval.size << ')' << std::dec;
+      firstInterval = false;
+    }
+
+    std::cout << '}';
+  }
+
   std::cout << '\n';
 }
 
@@ -102,6 +133,9 @@ int main() {
     }
 
     std::size_t elementCount = 0;
+    const auto rootBase = reinterpret_cast<std::uintptr_t>(&object);
+    const auto rootSize = sizeof(object);
+    bool sawRootInterval = false;
     bool sawId = false;
     bool sawCount = false;
     bool sawEnabled = false;
@@ -109,6 +143,11 @@ int main() {
     for (const auto& element : *result) {
       ++elementCount;
       printElement(element);
+
+      if (element.type_path.size() == 1 &&
+          hasInterval(element, rootBase, rootSize)) {
+        sawRootInterval = true;
+      }
 
       if (element.name == "id") {
         sawId = true;
@@ -120,6 +159,13 @@ int main() {
     }
 
     std::cout << "element_count=" << elementCount << '\n';
+
+    if (!sawRootInterval) {
+      std::cerr << "Expected root object interval [0x" << std::hex << rootBase
+                << ", 0x" << rootBase + rootSize << ")\n"
+                << std::dec;
+      return EXIT_FAILURE;
+    }
 
     if (!sawId || !sawCount || !sawEnabled) {
       std::cerr << "Expected to see fields: id, count, enabled\n"
