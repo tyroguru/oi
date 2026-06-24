@@ -67,6 +67,23 @@ This removes the environment from your host system and makes the build pure.
 
 Running tests under `nix` is new to the project and may take some time to mature. The CI is the source of truth for now.
 
+### Install an OIL runtime bundle
+
+Applications that link against `liboil.so` or `liboil_jit.so` should not need the OI development tree or development shell at runtime. Enable `OIL_INSTALL_RUNTIME_BUNDLE` to install OIL's non-system shared library dependencies beside the OIL libraries and rewrite bundled ELF rpaths to look in that same directory.
+
+The bundle step currently targets Linux ELF installs and requires `patchelf`:
+
+    $ nix develop
+    $ cmake -B build -G Ninja \
+        -DCMAKE_INSTALL_PREFIX=/tmp/oil-sdk \
+        -DFORCE_BOOST_STATIC=Off \
+        -DOIL_INSTALL_RUNTIME_BUNDLE=ON
+    $ ninja -C build install
+
+The installed prefix contains the exported CMake package, OIL headers, `liboil.so`, `liboil_jit.so`, and copied runtime dependencies under `lib/oil-runtime`. The installed OIL shared libraries use `$ORIGIN:$ORIGIN/oil-runtime` as their runtime search path, so the bundle can be relocated as a unit without putting bundled third-party libraries in the consumer application rpath.
+
+The bundle excludes the dynamic loader and core libc libraries by default. Adjust `OIL_RUNTIME_BUNDLE_PRE_EXCLUDE_REGEXES` if a packaging target needs a different policy. If reinstalling over an older flat bundle, use a clean install prefix or remove previously copied third-party `.so` files from `${prefix}/lib` so they do not appear in consumer application rpaths.
+
 ### Format source
 
     $ nix fmt

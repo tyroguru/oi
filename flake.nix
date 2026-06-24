@@ -53,6 +53,7 @@
               hexdump
               libtool
               ninja
+              patchelf
               pkgconf
               python312
               python312Packages.setuptools
