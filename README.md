@@ -77,12 +77,16 @@ The bundle step currently targets Linux ELF installs and requires `patchelf`:
     $ cmake -B build -G Ninja \
         -DCMAKE_INSTALL_PREFIX=/tmp/oil-sdk \
         -DFORCE_BOOST_STATIC=Off \
-        -DOIL_INSTALL_RUNTIME_BUNDLE=ON
+        -DOIL_INSTALL_RUNTIME_BUNDLE=ON \
+        -DOIL_INSTALL_SDK_CONFIG_BUNDLE=ON \
+        -DOIL_SDK_CONFIG_COMPILER=clang++
     $ ninja -C build install
 
-The installed prefix contains the exported CMake package, OIL headers, `liboil.so`, `liboil_jit.so`, and copied runtime dependencies under `lib/oil-runtime`. The installed OIL shared libraries use `$ORIGIN:$ORIGIN/oil-runtime` as their runtime search path, so the bundle can be relocated as a unit without putting bundled third-party libraries in the consumer application rpath.
+The installed prefix contains the exported CMake package, OIL headers, `liboil.so`, `liboil_jit.so`, copied runtime dependencies under `lib/oil-runtime`, and a relocatable SDK config at `share/oil/sdk.oid.toml`. The installed OIL shared libraries use `$ORIGIN:$ORIGIN/oil-runtime` as their runtime search path, so the bundle can be relocated as a unit without putting bundled third-party libraries in the consumer application rpath.
 
-The bundle excludes the dynamic loader and core libc libraries by default. Adjust `OIL_RUNTIME_BUNDLE_PRE_EXCLUDE_REGEXES` if a packaging target needs a different policy. If reinstalling over an older flat bundle, use a clean install prefix or remove previously copied third-party `.so` files from `${prefix}/lib` so they do not appear in consumer application rpaths.
+The SDK config bundle copies OIL container descriptions into `share/oil/types` and the compiler-discovered include roots into `share/oil/headers`. The generated `sdk.oid.toml` uses paths relative to itself, so applications can pass `${prefix}/share/oil/sdk.oid.toml` to OIL after relocating the SDK. This intentionally copies complete include roots rather than minimizing the header set.
+
+The runtime bundle excludes the dynamic loader and core libc libraries by default. Adjust `OIL_RUNTIME_BUNDLE_PRE_EXCLUDE_REGEXES` if a packaging target needs a different policy. If reinstalling over an older flat bundle, use a clean install prefix or remove previously copied third-party `.so` files from `${prefix}/lib` so they do not appear in consumer application rpaths.
 
 ### Format source
 
