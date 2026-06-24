@@ -24,6 +24,21 @@ option(WITH_TESTS "Build with tests" ON)
 option(WITH_FLAKY_TESTS "Build with flaky tests" ON)
 option(FORCE_BOOST_STATIC "Build with static boost" ON)
 option(FORCE_LLVM_STATIC "Build with static llvm and clang" ON)
+option(OIL_INSTALL_RUNTIME_BUNDLE "Install liboil shared-library runtime dependencies with OIL" OFF)
+set(OIL_RUNTIME_BUNDLE_DEPENDENCY_SUBDIR "oil-runtime" CACHE STRING "Subdirectory under CMAKE_INSTALL_LIBDIR for bundled OIL runtime dependencies")
+set(OIL_RUNTIME_BUNDLE_OIL_INSTALL_RPATH "\$ORIGIN;\$ORIGIN/${OIL_RUNTIME_BUNDLE_DEPENDENCY_SUBDIR}" CACHE STRING "Runtime search path for installed OIL shared libraries")
+set(OIL_RUNTIME_BUNDLE_DEPENDENCY_INSTALL_RPATH "\$ORIGIN" CACHE STRING "Runtime search path for bundled OIL dependency libraries")
+set(OIL_RUNTIME_BUNDLE_PRE_EXCLUDE_REGEXES
+  "^linux-vdso[.]so"
+  "^ld-linux.*[.]so"
+  "^libc[.]so"
+  "^libm[.]so"
+  "^libpthread[.]so"
+  "^librt[.]so"
+  "^libdl[.]so"
+  CACHE STRING
+  "Semicolon-separated dependency-name regexes excluded from the OIL runtime bundle"
+)
 
 # Fetch all external projects before we enable warnings globally
 
@@ -399,7 +414,10 @@ add_library(oil_shared SHARED
 )
 
 set_target_properties(oil_static PROPERTIES OUTPUT_NAME oil)
-set_target_properties(oil_shared PROPERTIES OUTPUT_NAME oil)
+set_target_properties(oil_shared PROPERTIES
+  OUTPUT_NAME oil
+  INSTALL_RPATH "${OIL_RUNTIME_BUNDLE_OIL_INSTALL_RPATH}"
+)
 
 foreach(target oil_static oil_shared)
   target_include_directories(${target}
@@ -459,7 +477,10 @@ add_library(oil_jit_shared SHARED
 )
 
 set_target_properties(oil_jit_static PROPERTIES OUTPUT_NAME oil_jit)
-set_target_properties(oil_jit_shared PROPERTIES OUTPUT_NAME oil_jit)
+set_target_properties(oil_jit_shared PROPERTIES
+  OUTPUT_NAME oil_jit
+  INSTALL_RPATH "${OIL_RUNTIME_BUNDLE_OIL_INSTALL_RPATH}"
+)
 
 foreach(target oil_jit_static oil_jit_shared)
   target_include_directories(${target}
@@ -493,6 +514,28 @@ install(
   TARGETS oil_jit_static
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(OIL_INSTALL_RUNTIME_BUNDLE)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "OIL_INSTALL_RUNTIME_BUNDLE currently supports Linux ELF bundles only")
+  endif()
+
+  find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
+
+  configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallOilRuntimeBundle.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/cmake/InstallOilRuntimeBundle.cmake
+    @ONLY
+  )
+
+  install(CODE
+    "set(OIL_RUNTIME_BUNDLE_SEED_LIBRARIES
+  \"$<TARGET_FILE:oil_shared>\"
+  \"$<TARGET_FILE:oil_jit_shared>\"
+)
+include(\"${CMAKE_CURRENT_BINARY_DIR}/cmake/InstallOilRuntimeBundle.cmake\")"
+  )
+endif()
 
 ### Object Introspection as a Library Generator (OILGen)
 add_executable(oilgen
