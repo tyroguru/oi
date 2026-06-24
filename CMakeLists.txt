@@ -25,6 +25,9 @@ option(WITH_FLAKY_TESTS "Build with flaky tests" ON)
 option(FORCE_BOOST_STATIC "Build with static boost" ON)
 option(FORCE_LLVM_STATIC "Build with static llvm and clang" ON)
 option(OIL_INSTALL_RUNTIME_BUNDLE "Install liboil shared-library runtime dependencies with OIL" OFF)
+option(OIL_INSTALL_SDK_CONFIG_BUNDLE "Install relocatable OIL SDK config, container descriptions, and compiler include roots" OFF)
+set(OIL_SDK_CONFIG_COMPILER "clang++" CACHE STRING "Compiler used to discover include roots for the installed OIL SDK config")
+set(OIL_SDK_CONFIG_PATH "share/oil/sdk.oid.toml" CACHE STRING "Config file path, relative to CMAKE_INSTALL_PREFIX, generated for the OIL SDK")
 set(OIL_RUNTIME_BUNDLE_DEPENDENCY_SUBDIR "oil-runtime" CACHE STRING "Subdirectory under CMAKE_INSTALL_LIBDIR for bundled OIL runtime dependencies")
 set(OIL_RUNTIME_BUNDLE_OIL_INSTALL_RPATH "\$ORIGIN;\$ORIGIN/${OIL_RUNTIME_BUNDLE_DEPENDENCY_SUBDIR}" CACHE STRING "Runtime search path for installed OIL shared libraries")
 set(OIL_RUNTIME_BUNDLE_DEPENDENCY_INSTALL_RPATH "\$ORIGIN" CACHE STRING "Runtime search path for bundled OIL dependency libraries")
@@ -535,6 +538,20 @@ if(OIL_INSTALL_RUNTIME_BUNDLE)
 )
 include(\"${CMAKE_CURRENT_BINARY_DIR}/cmake/InstallOilRuntimeBundle.cmake\")"
   )
+endif()
+
+if(OIL_INSTALL_SDK_CONFIG_BUNDLE)
+  if(NOT PYTHON)
+    message(FATAL_ERROR "OIL_INSTALL_SDK_CONFIG_BUNDLE requires python3")
+  endif()
+
+  configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallOilSdkConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/cmake/InstallOilSdkConfig.cmake
+    @ONLY
+  )
+
+  install(SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/cmake/InstallOilSdkConfig.cmake)
 endif()
 
 ### Object Introspection as a Library Generator (OILGen)

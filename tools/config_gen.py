@@ -18,6 +18,8 @@ import argparse
 import getpass
 import os
 import pathlib
+import re
+import shutil
 import subprocess
 import typing
 
@@ -191,11 +193,125 @@ def generate_toml(
     output_file: str,
 ):
     base_object.update(
-        {"headers": {"system_paths": system_paths, "user_paths": user_paths}}
+        {
+            "headers": {
+                "system_paths": list(system_paths),
+                "user_paths": list(user_paths),
+            }
+        }
     )
 
-    with open(output_file, "w") as f:
+    output_path = pathlib.Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
         toml.dump(base_object, f)
+
+
+def safe_component(value: pathlib.Path) -> str:
+    name = value.name or "root"
+    return re.sub(r"[^A-Za-z0-9._+-]+", "_", name)
+
+
+def replace_directory(path: pathlib.Path):
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def copy_directory_contents(source: pathlib.Path, destination: pathlib.Path):
+    replace_directory(destination)
+    # Preserve symlinks in compiler include roots. Some system include trees
+    # contain directory symlink cycles, such as ncurses -> ., which recurse
+    # indefinitely if copytree follows links.
+    shutil.copytree(source, destination, symlinks=True, dirs_exist_ok=True)
+
+
+def relative_to_config(path: pathlib.Path, config_directory: pathlib.Path) -> str:
+    return pathlib.Path(os.path.relpath(path, config_directory)).as_posix()
+
+
+def copy_container_configs(
+    base_object: typing.Dict,
+    types_directory: pathlib.Path,
+    config_directory: pathlib.Path,
+):
+    container_list = base_object.get("types", {}).get("containers")
+    if not container_list:
+        return
+
+    replace_directory(types_directory)
+    copied_containers = []
+    for idx, container in enumerate(container_list):
+        source = pathlib.Path(container)
+        if not source.exists():
+            raise RuntimeError(f"Container config not found: {source}")
+
+        destination = types_directory / f"{idx:02d}-{source.name}"
+        shutil.copy2(source, destination)
+        copied_containers.append(relative_to_config(destination, config_directory))
+
+    base_object["types"]["containers"] = copied_containers
+
+
+def copy_header_paths(
+    paths: typing.Iterable[str],
+    headers_directory: pathlib.Path,
+    config_directory: pathlib.Path,
+) -> typing.List[str]:
+    replace_directory(headers_directory)
+
+    copied_paths = []
+    for idx, path in enumerate(paths):
+        source = pathlib.Path(path).resolve()
+        if not source.exists():
+            continue
+        if not source.is_dir():
+            raise RuntimeError(f"Header path is not a directory: {source}")
+
+        destination = headers_directory / f"{idx:02d}-{safe_component(source)}"
+        copy_directory_contents(source, destination)
+        copied_paths.append(relative_to_config(destination, config_directory))
+
+    return copied_paths
+
+
+def generate_sdk_toml(
+    system_paths: typing.Iterable[str],
+    user_paths: typing.Iterable[str],
+    base_object: typing.Dict,
+    output_file: str,
+    sdk_root: str,
+    sdk_share_dir: str,
+    sdk_types_dir: str,
+    sdk_headers_dir: str,
+):
+    sdk_root_path = pathlib.Path(sdk_root).resolve()
+    share_directory = sdk_root_path / sdk_share_dir
+    output_path = pathlib.Path(output_file)
+    if not output_path.is_absolute():
+        output_path = share_directory / output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    config_directory = output_path.parent.resolve()
+    types_directory = share_directory / sdk_types_dir
+    headers_directory = share_directory / sdk_headers_dir
+
+    copy_container_configs(base_object, types_directory, config_directory)
+    copied_system_paths = copy_header_paths(
+        system_paths, headers_directory / "system", config_directory
+    )
+    copied_user_paths = copy_header_paths(
+        user_paths, headers_directory / "user", config_directory
+    )
+
+    generate_toml(
+        copied_system_paths,
+        copied_user_paths,
+        base_object,
+        str(output_path),
+    )
 
 
 def main():
@@ -220,6 +336,25 @@ def main():
         help="Which strategy to use for generating includes. Right now choose between using -E (preprocessor) or -v (verbose commands)",
     )
     parser.add_argument(
+        "--sdk-root",
+        help="Copy container configs and discovered include roots under this SDK prefix and emit relocatable paths.",
+    )
+    parser.add_argument(
+        "--sdk-share-dir",
+        default="share/oil",
+        help="Directory under --sdk-root for SDK config assets.",
+    )
+    parser.add_argument(
+        "--sdk-types-dir",
+        default="types",
+        help="Directory under --sdk-share-dir for copied container TOML files.",
+    )
+    parser.add_argument(
+        "--sdk-headers-dir",
+        default="headers",
+        help="Directory under --sdk-share-dir for copied compiler include roots.",
+    )
+    parser.add_argument(
         "output_file", help="Toml file to output finished config file to."
     )
     args = parser.parse_args()
@@ -234,11 +369,27 @@ def main():
     else:
         raise ValueError("Invalid include mode provided!")
 
+    system_includes = list(system_includes)
+    user_includes = list(user_includes)
+
     if args.skip_types:
         base = {}
     else:
         base = pull_base_toml()
-    generate_toml(system_includes, user_includes, base, args.output_file)
+
+    if args.sdk_root:
+        generate_sdk_toml(
+            system_includes,
+            user_includes,
+            base,
+            args.output_file,
+            args.sdk_root,
+            args.sdk_share_dir,
+            args.sdk_types_dir,
+            args.sdk_headers_dir,
+        )
+    else:
+        generate_toml(system_includes, user_includes, base, args.output_file)
 
 
 if __name__ == "__main__":
