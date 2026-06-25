@@ -1,0 +1,23 @@
+set(_oil_sdk_root "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
+set(_oil_sdk_config_path "${_oil_sdk_root}/@OIL_SDK_CONFIG_PATH@")
+
+execute_process(
+  COMMAND
+    "@PYTHON@"
+    "@CMAKE_CURRENT_SOURCE_DIR@/tools/config_gen.py"
+    -c "@OIL_SDK_CONFIG_COMPILER@"
+    --sdk-root "${_oil_sdk_root}"
+    "${_oil_sdk_config_path}"
+  WORKING_DIRECTORY "@CMAKE_CURRENT_SOURCE_DIR@"
+  RESULT_VARIABLE _oil_sdk_config_result
+  OUTPUT_VARIABLE _oil_sdk_config_stdout
+  ERROR_VARIABLE _oil_sdk_config_stderr
+)
+
+if(NOT _oil_sdk_config_result EQUAL 0)
+  message(FATAL_ERROR
+    "Failed to install OIL SDK config bundle:\n"
+    "${_oil_sdk_config_stdout}${_oil_sdk_config_stderr}")
+endif()
+
+message(STATUS "Installed OIL SDK config bundle: ${_oil_sdk_config_path}")
