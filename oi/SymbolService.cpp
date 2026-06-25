@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <boost/scope_exit.hpp>
 #include <cassert>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 
@@ -46,6 +48,34 @@ struct visitor : Ts... {
 // Type deduction for the helper above
 template <typename... Ts>
 visitor(Ts...) -> visitor<Ts...>;
+
+std::string trimTypeName(std::string_view name) {
+  while (!name.empty() &&
+         std::isspace(static_cast<unsigned char>(name.front()))) {
+    name.remove_prefix(1);
+  }
+  while (!name.empty() &&
+         std::isspace(static_cast<unsigned char>(name.back()))) {
+    name.remove_suffix(1);
+  }
+  return std::string{name};
+}
+
+std::string normalizeTypeName(std::string_view name) {
+  std::string normalized = trimTypeName(name);
+  for (std::string_view prefix : {"class ", "struct ", "union ", "enum "}) {
+    if (normalized.starts_with(prefix)) {
+      normalized.erase(0, prefix.size());
+      break;
+    }
+  }
+  return normalized;
+}
+
+bool sameTypeName(std::string_view candidate, std::string_view requested) {
+  return trimTypeName(candidate) == trimTypeName(requested) ||
+         normalizeTypeName(candidate) == normalizeTypeName(requested);
+}
 
 static bool LoadExecutableAddressRange(
     pid_t pid, std::vector<std::pair<uint64_t, uint64_t>>& exeAddrs) {
@@ -356,6 +386,87 @@ std::optional<drgn_qualified_type> SymbolService::findTypeOfAddr(
  * @param[in] symName - symbol to resolve
  * @return - A std::optional with the symbol's information
  */
+
+std::optional<drgn_qualified_type> SymbolService::findTypeByName(
+    std::string_view typeName) {
+  if (setenv("DRGN_ENABLE_TYPE_ITERATOR", "1", 1) < 0) {
+    PLOG(ERROR) << "Could not set DRGN_ENABLE_TYPE_ITERATOR";
+    return std::nullopt;
+  }
+
+  auto* drgnProg = getDrgnProgram();
+  if (drgnProg == nullptr) {
+    return std::nullopt;
+  }
+
+  drgn_type_iterator* typesIterator = nullptr;
+  if (auto* err = drgn_type_iterator_create(drgnProg, &typesIterator);
+      err != nullptr) {
+    LOG(ERROR) << "Error initialising drgn_type_iterator: " << err->code << ", "
+               << err->message;
+    drgn_error_destroy(err);
+    return std::nullopt;
+  }
+
+  std::optional<drgn_qualified_type> normalizedMatch;
+  size_t normalizedMatchCount = 0;
+
+  while (true) {
+    drgn_qualified_type* t = nullptr;
+    auto* err = drgn_type_iterator_next(typesIterator, &t);
+    if (err != nullptr) {
+      LOG(ERROR) << "Error from drgn_type_iterator_next: " << err->code << ", "
+                 << err->message;
+      drgn_error_destroy(err);
+      continue;
+    }
+
+    if (t == nullptr) {
+      break;
+    }
+
+    std::string candidateName = getTypeName(t->type);
+    if (candidateName.empty()) {
+      continue;
+    }
+
+    auto kind = drgn_type_kind(t->type);
+    bool isRelevantKind = kind == DRGN_TYPE_CLASS || kind == DRGN_TYPE_STRUCT ||
+                          kind == DRGN_TYPE_UNION || kind == DRGN_TYPE_ENUM ||
+                          kind == DRGN_TYPE_TYPEDEF;
+    if (!isRelevantKind) {
+      continue;
+    }
+
+    bool exactName = trimTypeName(candidateName) == trimTypeName(typeName);
+    if (!exactName && !sameTypeName(candidateName, typeName)) {
+      continue;
+    }
+
+    drgn_type* underlyingType = drgn_utils::underlyingType(t->type);
+    if (drgn_utils::isSizeComplete(underlyingType)) {
+      drgn_qualified_type found = *t;
+      drgn_type_iterator_destroy(typesIterator);
+      return found;
+    }
+
+    if (!normalizedMatch) {
+      normalizedMatch = *t;
+    }
+    ++normalizedMatchCount;
+  }
+
+  drgn_type_iterator_destroy(typesIterator);
+
+  if (normalizedMatchCount > 1) {
+    LOG(WARNING) << "Type name '" << typeName << "' matched "
+                 << normalizedMatchCount
+                 << " normalized DWARF names; using the first match";
+  }
+
+  return normalizedMatch;
+}
+
 std::optional<SymbolInfo> SymbolService::locateSymbol(
     const std::string& symName, bool demangle) {
   ModParams m = {.symName = symName,

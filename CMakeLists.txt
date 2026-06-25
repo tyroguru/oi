@@ -565,6 +565,15 @@ target_link_libraries(oilgen
   clangTooling
 )
 
+### Object Introspection explicit type generator
+add_executable(oil-typegen tools/OILTypeGen.cpp)
+target_link_libraries(oil-typegen oicore)
+if (STATIC_LINK)
+  target_link_libraries(oil-typegen gflags_static)
+else()
+  target_link_libraries(oil-typegen gflags_shared)
+endif()
+
 ### Object Introspection cache Printer (OIP)
 add_executable(oip tools/OIP.cpp)
 target_link_libraries(oip oicore)
