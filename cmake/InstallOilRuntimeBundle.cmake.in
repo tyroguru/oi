@@ -1,0 +1,115 @@
+set(_oil_bundle_libdir "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_LIBDIR@")
+set(_oil_bundle_dependency_dir "${_oil_bundle_libdir}/@OIL_RUNTIME_BUNDLE_DEPENDENCY_SUBDIR@")
+set(_oil_bundle_oil_rpath "@OIL_RUNTIME_BUNDLE_OIL_INSTALL_RPATH@")
+set(_oil_bundle_dependency_rpath "@OIL_RUNTIME_BUNDLE_DEPENDENCY_INSTALL_RPATH@")
+string(REPLACE ";" ":" _oil_bundle_oil_patchelf_rpath "${_oil_bundle_oil_rpath}")
+string(REPLACE ";" ":" _oil_bundle_dependency_patchelf_rpath "${_oil_bundle_dependency_rpath}")
+set(_oil_bundle_patchelf "@PATCHELF_EXECUTABLE@")
+set(_oil_bundle_pre_exclude_regexes "@OIL_RUNTIME_BUNDLE_PRE_EXCLUDE_REGEXES@")
+
+if(NOT OIL_RUNTIME_BUNDLE_SEED_LIBRARIES)
+  message(FATAL_ERROR "OIL runtime bundle has no seed libraries")
+endif()
+
+if(NOT EXISTS "${_oil_bundle_patchelf}")
+  message(FATAL_ERROR "patchelf not found: ${_oil_bundle_patchelf}")
+endif()
+
+file(MAKE_DIRECTORY "${_oil_bundle_libdir}" "${_oil_bundle_dependency_dir}")
+
+set(_oil_bundle_seed_library_dirs "${_oil_bundle_libdir}")
+foreach(_oil_bundle_seed_library IN LISTS OIL_RUNTIME_BUNDLE_SEED_LIBRARIES)
+  get_filename_component(_oil_bundle_seed_library_dir "${_oil_bundle_seed_library}" DIRECTORY)
+  list(APPEND _oil_bundle_seed_library_dirs "${_oil_bundle_seed_library_dir}")
+endforeach()
+list(REMOVE_DUPLICATES _oil_bundle_seed_library_dirs)
+
+file(GET_RUNTIME_DEPENDENCIES
+  LIBRARIES ${OIL_RUNTIME_BUNDLE_SEED_LIBRARIES}
+  DIRECTORIES ${_oil_bundle_seed_library_dirs}
+  RESOLVED_DEPENDENCIES_VAR _oil_bundle_resolved_dependencies
+  UNRESOLVED_DEPENDENCIES_VAR _oil_bundle_unresolved_dependencies
+  CONFLICTING_DEPENDENCIES_PREFIX _oil_bundle_conflicting_dependencies
+  PRE_EXCLUDE_REGEXES ${_oil_bundle_pre_exclude_regexes}
+)
+
+if(_oil_bundle_unresolved_dependencies)
+  list(JOIN _oil_bundle_unresolved_dependencies "\n  " _oil_bundle_unresolved_text)
+  message(FATAL_ERROR "Unresolved OIL runtime dependencies:\n  ${_oil_bundle_unresolved_text}")
+endif()
+
+if(_oil_bundle_conflicting_dependencies_FILENAMES)
+  foreach(_oil_bundle_conflict IN LISTS _oil_bundle_conflicting_dependencies_FILENAMES)
+    list(APPEND _oil_bundle_conflict_lines
+      "${_oil_bundle_conflict}: ${_oil_bundle_conflicting_dependencies_${_oil_bundle_conflict}}")
+  endforeach()
+  list(JOIN _oil_bundle_conflict_lines "\n  " _oil_bundle_conflict_text)
+  message(FATAL_ERROR "Conflicting OIL runtime dependencies:\n  ${_oil_bundle_conflict_text}")
+endif()
+
+foreach(_oil_bundle_dependency IN LISTS _oil_bundle_resolved_dependencies)
+  get_filename_component(_oil_bundle_name "${_oil_bundle_dependency}" NAME)
+
+  if(_oil_bundle_name MATCHES "^liboil(_jit)?\\.so")
+    continue()
+  endif()
+
+  file(INSTALL
+    DESTINATION "${_oil_bundle_dependency_dir}"
+    TYPE FILE
+    FOLLOW_SYMLINK_CHAIN
+    FILES "${_oil_bundle_dependency}"
+  )
+endforeach()
+
+file(GLOB _oil_bundle_installed_oil_libraries
+  "${_oil_bundle_libdir}/liboil.so*"
+  "${_oil_bundle_libdir}/liboil_jit.so*"
+)
+file(GLOB _oil_bundle_installed_dependency_libraries
+  "${_oil_bundle_dependency_dir}/*.so"
+  "${_oil_bundle_dependency_dir}/*.so.*"
+)
+list(REMOVE_DUPLICATES _oil_bundle_installed_oil_libraries)
+list(REMOVE_DUPLICATES _oil_bundle_installed_dependency_libraries)
+
+foreach(_oil_bundle_library IN LISTS _oil_bundle_installed_oil_libraries)
+  if(IS_SYMLINK "${_oil_bundle_library}")
+    continue()
+  endif()
+
+  execute_process(
+    COMMAND "${_oil_bundle_patchelf}" --set-rpath "${_oil_bundle_oil_patchelf_rpath}" "${_oil_bundle_library}"
+    RESULT_VARIABLE _oil_bundle_patchelf_result
+    OUTPUT_VARIABLE _oil_bundle_patchelf_stdout
+    ERROR_VARIABLE _oil_bundle_patchelf_stderr
+  )
+
+  if(NOT _oil_bundle_patchelf_result EQUAL 0)
+    message(FATAL_ERROR
+      "Failed to patch rpath for ${_oil_bundle_library}:\n"
+      "${_oil_bundle_patchelf_stdout}${_oil_bundle_patchelf_stderr}")
+  endif()
+endforeach()
+
+foreach(_oil_bundle_library IN LISTS _oil_bundle_installed_dependency_libraries)
+  if(IS_SYMLINK "${_oil_bundle_library}")
+    continue()
+  endif()
+
+  execute_process(
+    COMMAND "${_oil_bundle_patchelf}" --set-rpath "${_oil_bundle_dependency_patchelf_rpath}" "${_oil_bundle_library}"
+    RESULT_VARIABLE _oil_bundle_patchelf_result
+    OUTPUT_VARIABLE _oil_bundle_patchelf_stdout
+    ERROR_VARIABLE _oil_bundle_patchelf_stderr
+  )
+
+  if(NOT _oil_bundle_patchelf_result EQUAL 0)
+    message(FATAL_ERROR
+      "Failed to patch rpath for ${_oil_bundle_library}:\n"
+      "${_oil_bundle_patchelf_stdout}${_oil_bundle_patchelf_stderr}")
+  endif()
+endforeach()
+
+list(LENGTH _oil_bundle_resolved_dependencies _oil_bundle_dependency_count)
+message(STATUS "Installed OIL runtime bundle dependencies: ${_oil_bundle_dependency_count}")
