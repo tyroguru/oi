@@ -34,7 +34,32 @@ void getSizeType(const %1%<T, Allocator> &container, size_t& returnArg)
 """
 
 traversal_func = """
-auto tail = returnArg.write((uintptr_t)&container)
+auto tail = returnArg.delegate([&container](auto intervals) {
+#ifdef __GLIBCXX__
+  auto contents = intervals.write(container.size() + 1);
+
+  contents = contents.delegate([&container](auto interval) {
+    return interval
+        .write(reinterpret_cast<uintptr_t>(&container))
+        .write(sizeof(container));
+  });
+
+  for (auto it = container.begin(); it != container.end(); ++it) {
+    const auto* node = static_cast<const std::_List_node<T0>*>(it._M_node);
+
+    contents = contents.delegate([node](auto interval) {
+      return interval
+          .write(reinterpret_cast<uintptr_t>(node))
+          .write(sizeof(*node));
+    });
+  }
+
+  return contents.finish();
+#else
+  static_assert(false && "No known list node layout. See types/cxx11_list_type.toml");
+#endif
+})
+                .write((uintptr_t)&container)
                 .write(container.size());
 
 for (auto&& it : container) {
@@ -44,6 +69,30 @@ for (auto&& it : container) {
 }
 
 return tail.finish();
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
+func = """
+auto list = std::get<ParsedData::List>(d.val);
+
+el.va_intervals.clear();
+el.va_intervals.reserve(list.length);
+
+for (size_t i = 0; i < list.length; ++i) {
+  auto item = list.values();
+  auto pair = std::get<ParsedData::Pair>(item.val);
+
+  auto base = std::get<ParsedData::VarInt>(pair.first().val).value;
+  auto size = std::get<ParsedData::VarInt>(pair.second().val).value;
+
+  if (base != 0 && size != 0) {
+    el.va_intervals.push_back(result::Element::VAInterval{
+        .base = static_cast<uintptr_t>(base),
+        .size = static_cast<std::size_t>(size),
+    });
+  }
+}
 """
 
 [[codegen.processor]]
