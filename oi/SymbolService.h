@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -60,6 +61,7 @@ class SymbolService {
       drgn_program*, const std::string& symbolName);
   static std::optional<drgn_qualified_type> findTypeOfAddr(drgn_program*,
                                                            uintptr_t addr);
+  std::optional<drgn_qualified_type> findTypeByName(std::string_view typeName);
 
   std::unordered_map<std::string, std::shared_ptr<FuncDesc>> funcDescs;
   std::unordered_map<std::string, std::shared_ptr<GlobalDesc>> globalDescs;
