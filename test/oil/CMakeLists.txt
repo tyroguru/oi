@@ -112,6 +112,10 @@ add_oil_api_test(oil_vector_std_string
 add_oil_api_test(oil_list_leaf_structs
   oil_list_leaf_structs.cpp
 )
+
+add_oil_api_test(oil_array_leaf_structs
+  oil_array_leaf_structs.cpp
+)
 # add_oil_api_test(oil_03_unique_ptr_tree
 #   oil_unique_ptr_tree.cpp
 # )
