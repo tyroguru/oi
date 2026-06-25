@@ -30,7 +30,13 @@ void getSizeType(const %1%<T,N> &container, size_t& returnArg)
 """
 
 traversal_func = """
-    auto tail = returnArg.write(container.size());
+    auto tail = returnArg.delegate([&container](auto intervals) {
+        return intervals.write(1).delegate([&container](auto interval) {
+            return interval
+                .write(reinterpret_cast<uintptr_t>(&container))
+                .write(sizeof(container));
+        }).finish();
+    }).write(container.size());
 
     for (auto & it: container) {
         tail = tail.delegate([&ctx, &it](auto ret) {
@@ -39,6 +45,30 @@ traversal_func = """
     }
 
     return tail.finish();
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
+func = """
+auto list = std::get<ParsedData::List>(d.val);
+
+el.va_intervals.clear();
+el.va_intervals.reserve(list.length);
+
+for (size_t i = 0; i < list.length; ++i) {
+  auto item = list.values();
+  auto pair = std::get<ParsedData::Pair>(item.val);
+
+  auto base = std::get<ParsedData::VarInt>(pair.first().val).value;
+  auto size = std::get<ParsedData::VarInt>(pair.second().val).value;
+
+  if (base != 0 && size != 0) {
+    el.va_intervals.push_back(result::Element::VAInterval{
+        .base = static_cast<uintptr_t>(base),
+        .size = static_cast<std::size_t>(size),
+    });
+  }
+}
 """
 
 [[codegen.processor]]
