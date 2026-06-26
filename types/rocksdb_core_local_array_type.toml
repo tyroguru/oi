@@ -1,0 +1,122 @@
+[info]
+type_name = "rocksdb::CoreLocalArray"
+ctype = "SEQ_TYPE"
+header = "util/core_local.h"
+
+# Old:
+numTemplateParams = 1
+ns = ["namespace rocksdb"]
+typeName = "rocksdb::CoreLocalArray<"
+
+[codegen]
+decl = """
+template<typename T>
+void getSizeType(const %1%<T> &container, size_t& returnArg);
+"""
+
+func = """
+template<typename T>
+void getSizeType(const %1%<T> &container, size_t& returnArg)
+{
+    SAVE_SIZE(sizeof(%1%<T>));
+
+    const size_t size = container.Size();
+    SAVE_DATA((uintptr_t)&container);
+    SAVE_DATA((uintptr_t)size);
+    SAVE_DATA((uintptr_t)size);
+
+    for (size_t i = 0; i < size; ++i) {
+        getSizeType(*container.AccessAtCore(i), returnArg);
+    }
+}
+"""
+
+traversal_func = """
+const size_t size = container.Size();
+auto* data = size == 0 ? nullptr : container.AccessAtCore(0);
+
+auto tail = returnArg.delegate([&container, data, size](auto intervals) {
+  auto contents = intervals.write(data == nullptr ? 1 : 2);
+
+  // Interval 1: the CoreLocalArray object itself.
+  contents = contents.delegate([&container](auto interval) {
+    return interval
+        .write(reinterpret_cast<uintptr_t>(&container))
+        .write(sizeof(container));
+  });
+
+  // Interval 2: the owned backing array.
+  if (data != nullptr) {
+    contents = contents.delegate([data, size](auto interval) {
+      return interval
+          .write(reinterpret_cast<uintptr_t>(data))
+          .write(size * sizeof(T0));
+    });
+  }
+
+  return contents.finish();
+})
+.write((uintptr_t)&container)
+.write(size)
+.write(size);
+
+for (size_t i = 0; i < size; ++i) {
+  auto* element = container.AccessAtCore(i);
+  tail = tail.delegate([&ctx, element](auto ret) {
+    return OIInternal::getSizeType<Ctx>(ctx, *element, ret);
+  });
+}
+
+return tail.finish();
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
+func = """
+auto list = std::get<ParsedData::List>(d.val);
+
+el.va_intervals.clear();
+el.va_intervals.reserve(list.length);
+
+for (size_t i = 0; i < list.length; ++i) {
+  auto item = list.values();
+  auto pair = std::get<ParsedData::Pair>(item.val);
+
+  auto base = std::get<ParsedData::VarInt>(pair.first().val).value;
+  auto size = std::get<ParsedData::VarInt>(pair.second().val).value;
+
+  if (base != 0 && size != 0) {
+    el.va_intervals.push_back(result::Element::VAInterval{
+        .base = static_cast<uintptr_t>(base),
+        .size = static_cast<std::size_t>(size),
+    });
+  }
+}
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+el.pointer = std::get<ParsedData::VarInt>(d.val).value;
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+el.container_stats.emplace(result::Element::ContainerStats{
+  .capacity = std::get<ParsedData::VarInt>(d.val).value,
+});
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, typename TypeHandler<Ctx, T0>::type>"
+func = """
+static constexpr auto childField = make_field<Ctx, T0>("[]");
+
+auto list = std::get<ParsedData::List>(d.val);
+el.container_stats->length = list.length;
+
+for (size_t i = 0; i < list.length; ++i) {
+  stack_ins(childField);
+}
+"""

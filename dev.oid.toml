@@ -51,6 +51,7 @@ containers = [
     "PWD/types/std_variant.toml",
     "PWD/types/thrift_isset_type.toml",
     "PWD/types/weak_ptr_type.toml",
+    "PWD/types/rocksdb_core_local_array_type.toml",
 ]
 pass_through = [
     ["std::allocator", "memory"],
