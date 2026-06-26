@@ -47,6 +47,7 @@ containers = [
     "../types/std_variant.toml",
     "../types/thrift_isset_type.toml",
     "../types/weak_ptr_type.toml",
+    "../types/rocksdb_core_local_array_type.toml",
 ]
 pass_through = [
     ["std::allocator", "memory"],

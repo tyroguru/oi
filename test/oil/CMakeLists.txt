@@ -49,6 +49,7 @@ function(add_oil_api_test target source)
   target_compile_definitions(${target}
     PRIVATE
       OIL_TEST_CONFIG_PATH="${OIL_API_TEST_CONFIG_PATH}"
+      OIL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
   )
 
 
@@ -115,6 +116,10 @@ add_oil_api_test(oil_list_leaf_structs
 
 add_oil_api_test(oil_array_leaf_structs
   oil_array_leaf_structs.cpp
+)
+
+add_oil_api_test(oil_rocksdb_core_local_array
+  oil_rocksdb_core_local_array.cpp
 )
 # add_oil_api_test(oil_03_unique_ptr_tree
 #   oil_unique_ptr_tree.cpp
