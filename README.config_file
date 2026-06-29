@@ -1,0 +1,146 @@
+OIL config files
+================
+
+OIL needs a config file because it compiles generated C++ code outside the
+application build system. Debug information tells OIL what a type looks like in
+the target binary, but it does not tell OIL how to compile headers that the
+generated code includes. The config file supplies the missing compile context:
+container descriptions, pass-through type declarations, and compiler header
+search paths.
+
+The config file is TOML. Paths may be absolute, or relative to the directory
+containing the config file.
+
+
+Generating a config
+-------------------
+
+For local development, generate a config from the compiler you intend OIL to
+use:
+
+```
+./tools/config_gen.py -c clang++ build/testing.oid.toml
+```
+
+`config_gen.py` asks the compiler for its include search paths and writes them
+to the `[headers]` section. Unless `--skip-types` is used, it also starts from
+`dev.oid.toml`, which lists OI's built-in container descriptions.
+
+The generated file is a starting point. When introspecting a binary from
+another source tree, add that project's include roots to `user_paths`. For
+example, generated code for RocksDB container descriptors may include headers
+such as `util/autovector.h` or `util/core_local.h`, so a local RocksDB checkout
+needs:
+
+```
+[headers]
+user_paths = [
+  "/home/jon/Code/rocksdb",
+]
+```
+
+Some project headers also require build-specific preprocessor defines. Those
+defines are not currently represented in the OIL config file, and they cannot
+be recovered reliably from DWARF. If a container descriptor includes a project
+header that depends on such defines, the config or invocation must be extended
+using local knowledge of how that binary was built.
+
+
+SDK config
+----------
+
+For installed or relocatable SDK use, `config_gen.py` can copy the container
+descriptions and discovered include roots under an SDK prefix and emit paths
+relative to the generated config:
+
+```
+./tools/config_gen.py -c clang++ \
+  --sdk-root /tmp/oil-sdk \
+  sdk.oid.toml
+```
+
+This creates a bundle suitable for passing to OIL after the SDK is moved as a
+unit.
+
+
+Fields
+------
+
+`[types] containers`
+  A list of TOML files describing containers OIL should recognize specially.
+  Each container descriptor names a C++ type, its container category, required
+  header, template shape, and code generation snippets.
+
+  Example:
+
+  ```
+  [types]
+  containers = [
+    "types/vector_type.toml",
+    "types/rocksdb_autovector_type.toml",
+  ]
+  ```
+
+  Without a matching container descriptor, OIL falls back to the physical class
+  layout from debug information. That is often correct for ordinary structs,
+  but it is usually wrong for logical containers because their dynamic contents
+  are hidden behind implementation details.
+
+`[types] pass_through`
+  A list of two-element arrays: `[type_name, header]`.
+
+  Pass-through types are not described as containers. Instead, OIL emits the
+  requested header and lets the generated C++ refer to the existing type name.
+  This is useful for helper types that must be syntactically available to
+  compile generated code but do not need bespoke traversal logic.
+
+  Example:
+
+  ```
+  [types]
+  pass_through = [
+    ["std::allocator", "memory"],
+    ["std::char_traits", "string"],
+  ]
+  ```
+
+  If a `[types]` section is present, `pass_through` must be present as a list,
+  even if it is empty.
+
+`[headers] system_paths`
+  Include directories passed to the embedded Clang compiler as system header
+  paths. These should normally be compiler, C++ standard library, libc, and
+  package-manager include roots discovered by `config_gen.py`.
+
+  Example:
+
+  ```
+  [headers]
+  system_paths = [
+    "/nix/store/...-gcc/include/c++/13.3.0",
+    "/nix/store/...-glibc-dev/include",
+  ]
+  ```
+
+  Treat these as the compiler/toolchain environment. They should not usually
+  point at the target application's source tree.
+
+`[headers] user_paths`
+  Include directories passed to the embedded Clang compiler as user include
+  paths. Use this for project or application headers needed by generated code
+  and by container descriptors.
+
+  Example:
+
+  ```
+  [headers]
+  user_paths = [
+    "/home/jon/Code/rocksdb",
+    "/home/jon/Code/rocksdb/include",
+  ]
+  ```
+
+  This is the place to add source trees for third-party binaries being
+  introspected. If a descriptor says `header = "util/autovector.h"`, OIL needs
+  a `user_paths` entry whose include tree contains `util/autovector.h`.
+
