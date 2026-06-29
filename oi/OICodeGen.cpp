@@ -3741,7 +3741,14 @@ std::string OICodeGen::Config::toString() const {
     ignoreMembers += ';';
   }
 
-  return boost::algorithm::join(toOptions(), ",") + "," + ignoreMembers;
+  std::string defines = "PreprocessorDefines=";
+  for (const auto& define : preprocessorDefines) {
+    defines += define;
+    defines += ';';
+  }
+
+  return boost::algorithm::join(toOptions(), ",") + "," + ignoreMembers + "," +
+         defines;
 }
 
 std::vector<std::string> OICodeGen::Config::toOptions() const {

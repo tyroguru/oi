@@ -31,6 +31,7 @@ def main():
         "headers": {
             "user_paths": [],
             "system_paths": [],
+            "preprocessor_defines": [],
         },
         "codegen": {
             "default_headers": set(),
@@ -49,6 +50,9 @@ def main():
         if headers is not None:
             out["headers"]["user_paths"] += headers.get("user_paths", [])
             out["headers"]["system_paths"] += headers.get("system_paths", [])
+            out["headers"]["preprocessor_defines"] += headers.get(
+                "preprocessor_defines", []
+            )
 
         codegen = cfg.get("codegen", None)
         if codegen is not None:

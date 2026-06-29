@@ -69,6 +69,7 @@ class OICodeGen {
     std::set<std::filesystem::path> containerConfigPaths;
     std::set<std::string> defaultHeaders;
     std::set<std::string> defaultNamespaces;
+    std::vector<std::string> preprocessorDefines;
     std::vector<std::pair<std::string, std::string>> membersToStub;
     std::vector<ContainerInfo> passThroughTypes;
     std::vector<KeyToCapture> keysToCapture;

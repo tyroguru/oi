@@ -123,11 +123,28 @@ struct OICaptureKeys : public T {
 )";
 }
 
+void addPreprocessorDefines(const OICodeGen::Config& config,
+                            std::string& code) {
+  for (const auto& define : config.preprocessorDefines) {
+    const auto equals = define.find('=');
+    code += "#define ";
+    if (equals == std::string::npos) {
+      code += define;
+      code += " 1\n";
+    } else {
+      code += define.substr(0, equals);
+      code += ' ';
+      code += define.substr(equals + 1);
+      code += '\n';
+    }
+  }
+}
+
 void addIncludes(const TypeGraph& typeGraph,
-                 FeatureSet features,
+                 const OICodeGen::Config& config,
                  std::string& code) {
   std::set<std::string_view> includes{"cstddef"};
-  if (features[Feature::TreeBuilderV2]) {
+  if (config.features[Feature::TreeBuilderV2]) {
     code += "#define DEFINE_DESCRIBE 1\n";  // added before all includes
 
     includes.emplace("functional");
@@ -135,12 +152,12 @@ void addIncludes(const TypeGraph& typeGraph,
     includes.emplace("oi/types/dy.h");
     includes.emplace("oi/types/st.h");
   }
-  if (features[Feature::Library]) {
+  if (config.features[Feature::Library]) {
     includes.emplace("memory");
     includes.emplace("oi/IntrospectionResult.h");
     includes.emplace("vector");
   }
-  if (features[Feature::JitTiming]) {
+  if (config.features[Feature::JitTiming]) {
     includes.emplace("chrono");
   }
   for (const Type& t : typeGraph.finalTypes) {
@@ -1323,14 +1340,16 @@ void CodeGen::transform(TypeGraph& typeGraph) {
 void CodeGen::generate(TypeGraph& typeGraph,
                        std::string& code,
                        RootFunctionName rootName) {
-  code = headers::oi_OITraceCode_cpp;
+  code.clear();
+  addPreprocessorDefines(config_, code);
+  code += headers::oi_OITraceCode_cpp;
   if (!config_.features[Feature::Library]) {
     FuncGen::DeclareExterns(code);
   }
   if (!config_.features[Feature::TreeBuilderV2]) {
     defineMacros(code);
   }
-  addIncludes(typeGraph, config_.features, code);
+  addIncludes(typeGraph, config_, code);
   defineInternalTypes(code);
   FuncGen::DefineJitLog(code, config_.features);
 
