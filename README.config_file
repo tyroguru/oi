@@ -40,10 +40,22 @@ user_paths = [
 ```
 
 Some project headers also require build-specific preprocessor defines. Those
-defines are not currently represented in the OIL config file, and they cannot
-be recovered reliably from DWARF. If a container descriptor includes a project
-header that depends on such defines, the config or invocation must be extended
-using local knowledge of how that binary was built.
+defines cannot be recovered reliably from DWARF, so add them explicitly to
+`preprocessor_defines` using local knowledge of how that binary was built:
+
+```
+[headers]
+user_paths = [
+  "/home/jon/Code/rocksdb",
+]
+preprocessor_defines = [
+  "ROCKSDB_PLATFORM_POSIX=1",
+  "OS_LINUX=1",
+]
+```
+
+OIL emits these defines at the top of the generated C++ file, before any
+headers are included.
 
 
 SDK config
@@ -144,3 +156,24 @@ Fields
   introspected. If a descriptor says `header = "util/autovector.h"`, OIL needs
   a `user_paths` entry whose include tree contains `util/autovector.h`.
 
+
+`[headers] preprocessor_defines`
+  Preprocessor macros emitted into generated C++ before any `#include`
+  directives. Entries use compiler `-D` style syntax: either `NAME` or
+  `NAME=VALUE`. `NAME` is emitted as `#define NAME 1`.
+
+  Example:
+
+  ```
+  [headers]
+  preprocessor_defines = [
+    "ROCKSDB_PLATFORM_POSIX=1",
+    "OS_LINUX=1",
+    "ROCKSDB_LIB_IO_POSIX=1",
+  ]
+  ```
+
+  Use this for project build defines required by headers named in container
+  descriptors. The values should match the binary being introspected; choosing
+  different defines can make headers compile with a layout or API that does not
+  match the debug information in the target binary.

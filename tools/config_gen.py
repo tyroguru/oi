@@ -197,6 +197,7 @@ def generate_toml(
             "headers": {
                 "system_paths": list(system_paths),
                 "user_paths": list(user_paths),
+                "preprocessor_defines": [],
             }
         }
     )

@@ -21,6 +21,7 @@
 #include <boost/algorithm/string/split.hpp>
 #include <boost/property_tree/ini_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+#include <cctype>
 #include <filesystem>
 
 #include "oi/support/Toml.h"
@@ -37,7 +38,33 @@ std::optional<FeatureSet> processConfigFile(const std::string& configFilePath,
                                             OICompiler::Config& compilerConfig,
                                             OICodeGen::Config& generatorConfig);
 
+bool isValidMacroDefinition(std::string_view define) {
+  const auto equals = define.find('=');
+  const auto name = define.substr(0, equals);
+  if (name.empty() ||
+      !(std::isalpha(static_cast<unsigned char>(name.front())) ||
+        name.front() == '_')) {
+    return false;
+  }
+
+  for (char c : name) {
+    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) {
+      return false;
+    }
+  }
+
+  if (equals != std::string_view::npos) {
+    const auto value = define.substr(equals + 1);
+    if (value.find('\n') != std::string_view::npos ||
+        value.find('\r') != std::string_view::npos) {
+      return false;
+    }
+  }
+
+  return true;
 }
+
+}  // namespace
 
 std::optional<FeatureSet> processConfigFiles(
     std::span<const fs::path> configFilePaths,
@@ -160,6 +187,20 @@ std::optional<FeatureSet> processConfigFile(
                                                      el.get());
         }
       });
+    }
+    if (toml::array* arr = (*headers)["preprocessor_defines"].as_array()) {
+      for (auto&& el : *arr) {
+        auto* define = el.as_string();
+        if (!define) {
+          LOG(ERROR) << "preprocessor_defines entries must be strings";
+          return {};
+        }
+        if (!isValidMacroDefinition(define->get())) {
+          LOG(ERROR) << "invalid preprocessor define: " << define->get();
+          return {};
+        }
+        generatorConfig.preprocessorDefines.emplace_back(define->get());
+      }
     }
   }
 
