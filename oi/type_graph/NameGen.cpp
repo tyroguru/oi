@@ -227,15 +227,28 @@ void NameGen::visit(Incomplete& i) {
   std::string_view inputName = i.inputName();
 
   std::string name;
-  name.reserve(kPrefix.size() + inputName.size() + 2);
+  name.reserve(kPrefix.size() + inputName.size() + 32);
   name = kPrefix;
 
+  // Incomplete nodes are emitted as the generated C++ template Incomplete<T>.
+  // Its template argument is only a placeholder tag, but it still has to be
+  // syntactically valid C++ even when DWARF did not give us a usable name.
+  bool emittedNameChar = false;
   for (const unsigned char c : inputName) {
     if (std::isalnum(c)) {
       name += c;
+      emittedNameChar = true;
     } else {
       name += '_';
     }
+  }
+  if (!emittedNameChar) {
+    // Unsized array template parameters, for example the T[] in
+    // std::unique_ptr<T[]>, can reach this point without a useful spelling.
+    // They are intentionally non-traversable, but enclosing layout-compatible
+    // types still need a valid placeholder to compile.
+    name += "oi_anon_";
+    name += std::to_string(i.id());
   }
   name += ">";
 

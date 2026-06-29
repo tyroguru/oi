@@ -514,3 +514,12 @@ TEST(NameGenTest, IncompleteTypes) {
   EXPECT_EQ(myincompletevector.name(), "Incomplete<struct std__vector_int_>");
   EXPECT_EQ(myincompleteint.name(), "Incomplete<struct int32_t>");
 }
+
+TEST(NameGenTest, EmptyIncompleteTypeName) {
+  auto incomplete = Incomplete{2, ""};
+
+  NameGen nameGen;
+  nameGen.generateNames({incomplete});
+
+  EXPECT_EQ(incomplete.name(), "Incomplete<struct oi_anon_2>");
+}
