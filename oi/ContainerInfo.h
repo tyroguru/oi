@@ -59,6 +59,7 @@ struct ContainerInfo {
                 std::optional<size_t> allocatorIndex_,
                 std::optional<size_t> underlyingContainerIndex_,
                 std::vector<size_t> stubTemplateParams_,
+                std::vector<size_t> completeTemplateParamIndexes_,
                 oi::detail::FeatureSet requiredFeatures,
                 ContainerInfo::Codegen codegen_)
       : typeName(std::move(typeName_)),
@@ -70,6 +71,7 @@ struct ContainerInfo {
         allocatorIndex(allocatorIndex_),
         underlyingContainerIndex(underlyingContainerIndex_),
         stubTemplateParams(std::move(stubTemplateParams_)),
+        completeTemplateParamIndexes(std::move(completeTemplateParamIndexes_)),
         requiredFeatures(requiredFeatures),
         codegen(std::move(codegen_)),
         matcher_(std::move(matcher)) {
@@ -99,6 +101,10 @@ struct ContainerInfo {
   // adapter
   std::optional<size_t> underlyingContainerIndex{};
   std::vector<size_t> stubTemplateParams{};
+  // Template parameters that must be complete before generated code
+  // instantiates this container type. Inline-storage containers need this
+  // even when their ctype normally allows incomplete element types.
+  std::vector<size_t> completeTemplateParamIndexes{};
   bool captureKeys = false;
   oi::detail::FeatureSet requiredFeatures;
 

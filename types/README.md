@@ -98,6 +98,12 @@ This document describes the format of the container definition files contained i
   container's template parameters. All of a container's parameters will still be
   enumerated and output in CodeGen, regardless of this setting.
 
+- `complete_template_param_indexes`
+
+  Template parameter indexes that must be fully defined before this container is
+  instantiated in generated code. Use this for containers with inline element
+  storage, where a forward-declared element type is not sufficient.
+
 - `allocatorIndex`
 
   Index of a template parameter representing an allocator. It will be not be

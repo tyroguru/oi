@@ -15,6 +15,8 @@
  */
 #include "TopoSorter.h"
 
+#include <algorithm>
+
 #include "TypeGraph.h"
 
 template <typename T>
@@ -103,7 +105,15 @@ bool containerAllowsIncompleteParam(const Container& c, size_t i) {
 void TopoSorter::visit(Container& c) {
   for (size_t i = 0; i < c.templateParams.size(); i++) {
     const auto& param = c.templateParams[i];
-    if (containerAllowsIncompleteParam(c, i)) {
+    // Some SEQ_TYPE containers, such as rocksdb::autovector, store T
+    // inline and cannot be instantiated with only a forward declaration.
+    // completeTemplateParamIndexes lets those containers opt out of the
+    // broad std::vector-style incomplete-element rule above.
+    const bool requiresCompleteParam =
+        std::find(c.containerInfo_.completeTemplateParamIndexes.begin(),
+                  c.containerInfo_.completeTemplateParamIndexes.end(),
+                  i) != c.containerInfo_.completeTemplateParamIndexes.end();
+    if (!requiresCompleteParam && containerAllowsIncompleteParam(c, i)) {
       acceptAfter(param.type());
     } else {
       accept(param.type());

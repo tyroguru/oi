@@ -1,0 +1,152 @@
+[info]
+type_name = "rocksdb::autovector"
+ctype = "SEQ_TYPE"
+header = "util/autovector.h"
+
+# Old:
+numTemplateParams = 1
+# autovector stores its first N elements inline as T[N], so generated code
+# must define T before it instantiates rocksdb::autovector<T, N>. The generic
+# SEQ_TYPE rule permits incomplete element types for std::vector, but that is
+# not valid for this container.
+complete_template_param_indexes = [0]
+ns = ["namespace rocksdb"]
+typeName = "rocksdb::autovector<"
+
+[codegen]
+decl = """
+template<typename T, std::size_t N>
+void getSizeType(const %1%<T, N> &container, size_t& returnArg);
+"""
+
+func = """
+template<typename T, std::size_t N>
+void getSizeType(const %1%<T, N> &container, size_t& returnArg)
+{
+    SAVE_SIZE(sizeof(%1%<T, N>));
+
+    const size_t capacity = container.capacity();
+    const size_t size = container.size();
+    const size_t inline_length = std::min<size_t>(size, N);
+    const size_t overflow_capacity = capacity > N ? capacity - N : 0;
+    const size_t overflow_length = size > N ? size - N : 0;
+
+    SAVE_SIZE(-(inline_length * sizeof(T)));
+    SAVE_SIZE((overflow_capacity - overflow_length) * sizeof(T));
+
+    SAVE_DATA((uintptr_t)&container);
+    SAVE_DATA((uintptr_t)capacity);
+    SAVE_DATA((uintptr_t)size);
+
+    for (size_t i = 0; i < size; ++i) {
+        getSizeType(container[i], returnArg);
+    }
+}
+"""
+
+traversal_func = """
+const size_t capacity = container.capacity();
+const size_t size = container.size();
+const bool has_overflow_storage = capacity > N0 && size > N0;
+
+auto tail = returnArg.delegate([&container, capacity, has_overflow_storage](auto intervals) {
+  auto contents = intervals.write(has_overflow_storage ? 2 : 1);
+
+  // Interval 1: the autovector object, including inline storage.
+  contents = contents.delegate([&container](auto interval) {
+    return interval
+        .write(reinterpret_cast<uintptr_t>(&container))
+        .write(sizeof(container));
+  });
+
+  // Interval 2: overflow std::vector storage, when there is at least one
+  // overflow element from which we can safely recover the data pointer.
+  if (has_overflow_storage) {
+    contents = contents.delegate([&container, capacity](auto interval) {
+      return interval
+          .write(reinterpret_cast<uintptr_t>(&container[N0]))
+          .write((capacity - N0) * sizeof(T0));
+    });
+  }
+
+  return contents.finish();
+})
+.write((uintptr_t)&container)
+.write(capacity)
+// This is the length for the following List<T0> payload. Without it, the
+// writer remains a List rather than ListContents and element delegation fails.
+.write(size);
+
+for (size_t i = 0; i < size; ++i) {
+  const auto& element = container[i];
+  tail = tail.delegate([&ctx, &element](auto ret) {
+    return OIInternal::getSizeType<Ctx>(ctx, element, ret);
+  });
+}
+
+return tail.finish();
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
+func = """
+auto list = std::get<ParsedData::List>(d.val);
+
+el.va_intervals.clear();
+el.va_intervals.reserve(list.length);
+
+for (size_t i = 0; i < list.length; ++i) {
+  auto item = list.values();
+  auto pair = std::get<ParsedData::Pair>(item.val);
+
+  auto base = std::get<ParsedData::VarInt>(pair.first().val).value;
+  auto size = std::get<ParsedData::VarInt>(pair.second().val).value;
+
+  if (base != 0 && size != 0) {
+    el.va_intervals.push_back(result::Element::VAInterval{
+        .base = static_cast<uintptr_t>(base),
+        .size = static_cast<std::size_t>(size),
+    });
+  }
+}
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+el.pointer = std::get<ParsedData::VarInt>(d.val).value;
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+el.container_stats.emplace(result::Element::ContainerStats{
+  .capacity = std::get<ParsedData::VarInt>(d.val).value,
+});
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, typename TypeHandler<Ctx, T0>::type>"
+func = """
+static constexpr auto childField = make_field<Ctx, T0>("[]");
+
+auto list = std::get<ParsedData::List>(d.val);
+el.container_stats->length = list.length;
+
+const size_t inline_length = std::min<size_t>(list.length, N0);
+const size_t overflow_capacity = el.container_stats->capacity > N0
+                                     ? el.container_stats->capacity - N0
+                                     : 0;
+const size_t overflow_length = list.length > N0 ? list.length - N0 : 0;
+
+// Inline elements are already covered by the autovector object's static size.
+el.exclusive_size -= inline_length * sizeof(T0);
+
+// Overflow elements live in the std::vector backing storage, so only add
+// spare overflow capacity here; live overflow elements are visited as children.
+el.exclusive_size += (overflow_capacity - overflow_length) * sizeof(T0);
+
+for (size_t i = 0; i < list.length; ++i) {
+  stack_ins(childField);
+}
+"""

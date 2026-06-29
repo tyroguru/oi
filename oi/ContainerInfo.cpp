@@ -126,6 +126,25 @@ const char* containerTypeEnumToStr(ContainerTypeEnum ty) {
     });
   }
 
+  std::vector<size_t> completeTemplateParamIndexes{};
+  if (toml::array* arr =
+          (*info)["complete_template_param_indexes"].as_array()) {
+    completeTemplateParamIndexes.reserve(arr->size());
+    arr->for_each([&](auto&& el) {
+      if constexpr (toml::is_integer<decltype(el)>) {
+        completeTemplateParamIndexes.push_back(*el);
+      }
+    });
+  }
+  if (toml::array* arr = (*info)["completeTemplateParamIndexes"].as_array()) {
+    completeTemplateParamIndexes.reserve(arr->size());
+    arr->for_each([&](auto&& el) {
+      if constexpr (toml::is_integer<decltype(el)>) {
+        completeTemplateParamIndexes.push_back(*el);
+      }
+    });
+  }
+
   oi::detail::FeatureSet requiredFeatures;
   if (toml::array* arr = (*info)["required_features"].as_array()) {
     arr->for_each([&](auto&& el) {
@@ -180,6 +199,7 @@ const char* containerTypeEnumToStr(ContainerTypeEnum ty) {
       allocatorIndex,
       underlyingContainerIndex,
       {},
+      std::move(completeTemplateParamIndexes),
       requiredFeatures,
       {
           std::move(decl),
@@ -252,6 +272,19 @@ ContainerInfo::ContainerInfo(const fs::path& path) {
       } else {
         throw ContainerInfoError(
             path, "stub_template_params should only contain integers");
+      }
+    });
+  }
+
+  if (toml::array* arr = info["complete_template_param_indexes"].as_array()) {
+    completeTemplateParamIndexes.reserve(arr->size());
+    arr->for_each([&](auto&& el) {
+      if constexpr (toml::is_integer<decltype(el)>) {
+        completeTemplateParamIndexes.push_back(*el);
+      } else {
+        throw ContainerInfoError(
+            path,
+            "complete_template_param_indexes should only contain integers");
       }
     });
   }
