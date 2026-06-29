@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "oi/type_graph/TypeGraph.h"
 #include "oi/type_graph/TypeIdentifier.h"
 #include "oi/type_graph/Types.h"
 #include "test/type_graph_utils.h"
@@ -174,6 +175,30 @@ TEST(TypeIdentifierTest, ContainerNotReplaced) {
           Param
             Primitive: int32_t
 )");
+}
+
+TEST(TypeIdentifierTest, SmartPointerArrayParamIsIncomplete) {
+  ContainerInfo uniquePtrInfo{"std::unique_ptr", UNIQ_PTR_TYPE, "memory"};
+  uniquePtrInfo.stubTemplateParams = {1};
+
+  TypeGraph typeGraph;
+  auto& element = typeGraph.makeType<Primitive>(Primitive::Kind::Int8);
+  auto& array = typeGraph.makeType<Array>(element, 0);
+  auto& deleter = typeGraph.makeType<Dummy>(99, 0, 1, "default_delete<char[]>");
+  auto& uniquePtr = typeGraph.makeType<Container>(uniquePtrInfo, 8, nullptr);
+  uniquePtr.templateParams.emplace_back(array);
+  uniquePtr.templateParams.emplace_back(deleter);
+  typeGraph.addRoot(uniquePtr);
+
+  NodeTracker tracker;
+  auto pass = TypeIdentifier::createPass({});
+  pass.run(typeGraph, tracker);
+
+  auto* pointee =
+      dynamic_cast<Incomplete*>(&uniquePtr.templateParams[0].type());
+  ASSERT_NE(pointee, nullptr);
+  ASSERT_TRUE(pointee->underlyingType().has_value());
+  EXPECT_NE(dynamic_cast<Array*>(&pointee->underlyingType()->get()), nullptr);
 }
 
 TEST(TypeIdentifierTest, DummyNotReplaced) {

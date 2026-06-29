@@ -47,6 +47,34 @@ bool TypeIdentifier::isAllocator(Type& t) {
   return false;
 }
 
+namespace {
+
+bool isSmartPointer(const Container& c) {
+  return c.containerInfo_.ctype == UNIQ_PTR_TYPE ||
+         c.containerInfo_.ctype == SHRD_PTR_TYPE ||
+         c.containerInfo_.ctype == WEAK_PTR_TYPE;
+}
+
+// Return true for arrays even after they have already been wrapped in
+// Incomplete. TypeIdentifier may run after parser-level incompleteness has been
+// recorded, and the smart-pointer rule below should still recognize that the
+// original pointee was an array.
+bool isArrayLike(Type& type) {
+  if (dynamic_cast<Array*>(&type)) {
+    return true;
+  }
+
+  auto* incomplete = dynamic_cast<Incomplete*>(&type);
+  if (!incomplete) {
+    return false;
+  }
+
+  auto underlyingType = incomplete->underlyingType();
+  return underlyingType && dynamic_cast<Array*>(&underlyingType->get());
+}
+
+}  // namespace
+
 void TypeIdentifier::accept(Type& type) {
   if (tracker_.visit(type))
     return;
@@ -59,6 +87,20 @@ void TypeIdentifier::visit(Container& c) {
   // TODO these two arrays could be looped over in sync for better performance
   for (size_t i = 0; i < c.templateParams.size(); i++) {
     const auto& param = c.templateParams[i];
+
+    // Smart pointers to arrays, e.g. std::unique_ptr<char[]>, have
+    // pointer-sized layout but no discoverable element count. The only safe
+    // representation is therefore the same one we use for opaque raw pointers:
+    // keep the owning smart pointer type intact for sizeof/offsetof checks, but
+    // make the pointee non-traversable.
+    if (i == 0 && isSmartPointer(c) && isArrayLike(param.type())) {
+      if (!dynamic_cast<Incomplete*>(&param.type())) {
+        auto& incomplete = typeGraph_.makeType<Incomplete>(param.type());
+        c.templateParams[i] = incomplete;
+      }
+      continue;
+    }
+
     if (dynamic_cast<Dummy*>(&param.type()) ||
         dynamic_cast<DummyAllocator*>(&param.type()) ||
         dynamic_cast<Container*>(&param.type())) {
