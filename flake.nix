@@ -110,6 +110,7 @@
           pkgs.mkShell.override { stdenv = llvmPackages.stdenv; } {
             inputsFrom = [ self.packages.${system}."oid-llvm${toString llvmVersion}" ];
             buildInputs = [ ];
+            DEBUGINFOD_URLS = "";
           };
       in
       {

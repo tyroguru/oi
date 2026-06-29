@@ -91,6 +91,7 @@ function(add_oil_api_test target source)
   set_tests_properties(${target}
     PROPERTIES
       LABELS "oil"
+      ENVIRONMENT "DEBUGINFOD_URLS="
   )
 endfunction()
 
@@ -120,6 +121,10 @@ add_oil_api_test(oil_array_leaf_structs
 
 add_oil_api_test(oil_rocksdb_core_local_array
   oil_rocksdb_core_local_array.cpp
+)
+
+add_oil_api_test(oil_rocksdb_autovector
+  oil_rocksdb_autovector.cpp
 )
 # add_oil_api_test(oil_03_unique_ptr_tree
 #   oil_unique_ptr_tree.cpp
