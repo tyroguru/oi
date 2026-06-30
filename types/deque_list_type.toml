@@ -53,7 +53,7 @@ traversal_func = """
  * From the source of <bits/stl_deque.h>, a std::deque has the following members:
  */
 struct OI_Deque_impl_data {
-  std::nullptr_t map;
+  void* map;
   size_t map_capacity;
   typename container_type::const_iterator start;
   typename container_type::const_iterator finish;
@@ -68,7 +68,7 @@ const auto block_count = 1 + std::distance(begin._M_node, end._M_node);
 const auto block_size = (uintptr_t)begin._M_last - (uintptr_t)begin._M_first;
 
 constexpr auto static_size = sizeof(container_type);
-const auto total_map_size = map_capacity * sizeof(std::nullptr_t);
+const auto total_map_size = map_capacity * sizeof(void*);
 const auto total_block_size = block_count * block_size;
 const auto total_element_size = container.size() * sizeof(typename container_type::value_type);
 
@@ -80,7 +80,47 @@ static_assert(false, "libc++ is currently not supported");
 static_assert(false, "Unsupported STL container. Seet types/deque_list_type.toml");
 #endif
 
-auto tail = returnArg
+auto tail = returnArg.delegate([&container, rc, begin, end, map_capacity, block_count, block_size](auto intervals) {
+#ifdef __GLIBCXX__
+  // A libstdc++ deque owns three distinct storage regions: the deque object,
+  // the map array of block pointers, and each fixed-size element block.
+  auto interval_count = static_cast<size_t>(1 + block_count);
+  if (rc->map != nullptr && map_capacity != 0) {
+    ++interval_count;
+  }
+
+  auto contents = intervals.write(interval_count);
+
+  // Interval 1: the deque object itself.
+  contents = contents.delegate([&container](auto interval) {
+    return interval
+        .write(reinterpret_cast<uintptr_t>(&container))
+        .write(sizeof(container));
+  });
+
+  // Interval 2: the map array that stores pointers to element blocks.
+  if (rc->map != nullptr && map_capacity != 0) {
+    contents = contents.delegate([rc, map_capacity](auto interval) {
+      return interval
+          .write(reinterpret_cast<uintptr_t>(rc->map))
+          .write(map_capacity * sizeof(void*));
+    });
+  }
+
+  // Remaining intervals: each allocated block of contiguous element storage.
+  for (auto node = begin._M_node; node <= end._M_node; ++node) {
+    contents = contents.delegate([node, block_size](auto interval) {
+      return interval
+          .write(reinterpret_cast<uintptr_t>(*node))
+          .write(block_size);
+    });
+  }
+
+  return contents.finish();
+#else
+  static_assert(false, "Unsupported STL container. See types/deque_list_type.toml");
+#endif
+})
   .write((uintptr_t)&container)
   .write(exclusive_size)
   .write(capacity)
@@ -93,6 +133,30 @@ for (auto&& it: container) {
 }
 
 return tail.finish();
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
+func = """
+auto list = std::get<ParsedData::List>(d.val);
+
+el.va_intervals.clear();
+el.va_intervals.reserve(list.length);
+
+for (size_t i = 0; i < list.length; ++i) {
+  auto item = list.values();
+  auto pair = std::get<ParsedData::Pair>(item.val);
+
+  auto base = std::get<ParsedData::VarInt>(pair.first().val).value;
+  auto size = std::get<ParsedData::VarInt>(pair.second().val).value;
+
+  if (base != 0 && size != 0) {
+    el.va_intervals.push_back(result::Element::VAInterval{
+        .base = static_cast<uintptr_t>(base),
+        .size = static_cast<std::size_t>(size),
+    });
+  }
+}
 """
 
 [[codegen.processor]]
