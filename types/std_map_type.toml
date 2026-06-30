@@ -38,7 +38,34 @@ void getSizeType(const %1%<K, T, C, A> &container, size_t& returnArg)
 """
 
 traversal_func = """
-auto tail = returnArg
+auto tail = returnArg.delegate([&container](auto intervals) {
+#ifdef __GLIBCXX__
+  auto contents = intervals.write(container.size() + 1);
+
+  // Interval 1: the std::map object itself.
+  contents = contents.delegate([&container](auto interval) {
+    return interval
+        .write(reinterpret_cast<uintptr_t>(&container))
+        .write(sizeof(container));
+  });
+
+  // Remaining intervals: one red-black-tree node per key/value pair.
+  for (auto it = container.begin(); it != container.end(); ++it) {
+    using value_type = std::pair<const T0, T1>;
+    const auto* node = static_cast<const std::_Rb_tree_node<value_type>*>(it._M_node);
+
+    contents = contents.delegate([node](auto interval) {
+      return interval
+          .write(reinterpret_cast<uintptr_t>(node))
+          .write(sizeof(*node));
+    });
+  }
+
+  return contents.finish();
+#else
+  static_assert(false && "No known map node layout. See types/std_map_type.toml");
+#endif
+})
   .write((uintptr_t)&container)
   .write(container.size());
 
@@ -53,6 +80,30 @@ for (const auto &entry: container) {
 }
 
 return tail.finish();
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
+func = """
+auto list = std::get<ParsedData::List>(d.val);
+
+el.va_intervals.clear();
+el.va_intervals.reserve(list.length);
+
+for (size_t i = 0; i < list.length; ++i) {
+  auto item = list.values();
+  auto pair = std::get<ParsedData::Pair>(item.val);
+
+  auto base = std::get<ParsedData::VarInt>(pair.first().val).value;
+  auto size = std::get<ParsedData::VarInt>(pair.second().val).value;
+
+  if (base != 0 && size != 0) {
+    el.va_intervals.push_back(result::Element::VAInterval{
+        .base = static_cast<uintptr_t>(base),
+        .size = static_cast<std::size_t>(size),
+    });
+  }
+}
 """
 
 [[codegen.processor]]
