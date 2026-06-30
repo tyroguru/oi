@@ -1,0 +1,171 @@
+[info]
+type_name = "rocksdb::Arena"
+ctype = "ROCKSDB_ARENA_TYPE"
+header = "memory/arena.h"
+
+# Old:
+typeName = "rocksdb::Arena"
+matcher = "^rocksdb::Arena$"
+ns = ["namespace rocksdb"]
+numTemplateParams = 0
+replaceTemplateParamIndex = []
+
+[codegen]
+decl = """
+void getSizeType(const %1% &container, size_t& returnArg);
+"""
+
+func = """
+void getSizeType(const %1% &container, size_t& returnArg)
+{
+    SAVE_SIZE(sizeof(%1%));
+
+    const size_t capacity = container.MemoryAllocatedBytes();
+    const size_t length = container.ApproximateMemoryUsage();
+
+    SAVE_SIZE(capacity > %1%::kInlineSize ? capacity - %1%::kInlineSize : 0);
+    SAVE_DATA((uintptr_t)&container);
+    SAVE_DATA((uintptr_t)capacity);
+    SAVE_DATA((uintptr_t)length);
+}
+"""
+
+traversal_func = """
+struct OIArenaLayout {
+  void* vptr;
+  alignas(std::max_align_t) char inline_block[rocksdb::Arena::kInlineSize];
+  const std::size_t block_size;
+  std::deque<std::unique_ptr<char[]>> blocks;
+  std::deque<rocksdb::MemMapping> huge_blocks;
+  std::size_t irregular_block_num;
+  char* unaligned_alloc_ptr;
+  char* aligned_alloc_ptr;
+  std::size_t alloc_bytes_remaining;
+  std::size_t hugetlb_size;
+  std::size_t blocks_memory;
+  rocksdb::AllocTracker* tracker;
+};
+
+static_assert(sizeof(OIArenaLayout) == sizeof(rocksdb::Arena),
+              "OIL rocksdb::Arena layout is out of date");
+
+const auto* layout = reinterpret_cast<const OIArenaLayout*>(&container);
+const std::size_t capacity = layout->blocks_memory;
+const std::size_t length = capacity + layout->blocks.size() * sizeof(char*) -
+                           layout->alloc_bytes_remaining;
+
+std::size_t regular_block_intervals = 0;
+// Arena keeps exact sizes for huge-page mappings but not for each malloc-backed
+// char[] block. When irregular allocations are present, blocks_ can contain
+// entries smaller or larger than block_size, so skip those intervals rather
+// than emitting ranges with guessed lengths.
+if (layout->irregular_block_num == 0) {
+  for (const auto& block : layout->blocks) {
+    if (block != nullptr) {
+      ++regular_block_intervals;
+    }
+  }
+}
+
+std::size_t huge_block_intervals = 0;
+for (const auto& mapping : layout->huge_blocks) {
+  if (mapping.Get() != nullptr && mapping.Length() != 0) {
+    ++huge_block_intervals;
+  }
+}
+
+auto tail = returnArg.delegate([&container, layout, regular_block_intervals,
+                                huge_block_intervals](auto intervals) {
+  auto contents = intervals.write(1 + regular_block_intervals +
+                                  huge_block_intervals);
+
+  // Interval 1: the Arena object itself, including inline_block_.
+  contents = contents.delegate([&container](auto interval) {
+    return interval
+        .write(reinterpret_cast<uintptr_t>(&container))
+        .write(sizeof(container));
+  });
+
+  if (layout->irregular_block_num == 0) {
+    for (const auto& block : layout->blocks) {
+      if (block != nullptr) {
+        contents = contents.delegate([&block, layout](auto interval) {
+          return interval
+              .write(reinterpret_cast<uintptr_t>(block.get()))
+              .write(layout->block_size);
+        });
+      }
+    }
+  }
+
+  for (const auto& mapping : layout->huge_blocks) {
+    if (mapping.Get() != nullptr && mapping.Length() != 0) {
+      contents = contents.delegate([&mapping](auto interval) {
+        return interval
+            .write(reinterpret_cast<uintptr_t>(mapping.Get()))
+            .write(mapping.Length());
+      });
+    }
+  }
+
+  return contents.finish();
+})
+.write((uintptr_t)&container)
+.write(capacity)
+.write(length);
+
+return tail;
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
+func = """
+auto list = std::get<ParsedData::List>(d.val);
+
+el.va_intervals.clear();
+el.va_intervals.reserve(list.length);
+
+for (size_t i = 0; i < list.length; ++i) {
+  auto item = list.values();
+  auto pair = std::get<ParsedData::Pair>(item.val);
+
+  auto base = std::get<ParsedData::VarInt>(pair.first().val).value;
+  auto size = std::get<ParsedData::VarInt>(pair.second().val).value;
+
+  if (base != 0 && size != 0) {
+    el.va_intervals.push_back(result::Element::VAInterval{
+        .base = static_cast<uintptr_t>(base),
+        .size = static_cast<std::size_t>(size),
+    });
+  }
+}
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+el.pointer = std::get<ParsedData::VarInt>(d.val).value;
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+auto capacity = std::get<ParsedData::VarInt>(d.val).value;
+
+el.container_stats.emplace(result::Element::ContainerStats{
+  .capacity = capacity,
+});
+
+// MemoryAllocatedBytes() includes Arena::inline_block_, which is already part
+// of sizeof(Arena). Only the additional allocation accounting contributes to
+// this container's exclusive size.
+el.exclusive_size += capacity > rocksdb::Arena::kInlineSize
+                         ? capacity - rocksdb::Arena::kInlineSize
+                         : 0;
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+el.container_stats->length = std::get<ParsedData::VarInt>(d.val).value;
+"""

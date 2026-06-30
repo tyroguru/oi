@@ -142,6 +142,10 @@ add_oil_api_test(oil_rocksdb_core_local_array
 add_oil_api_test(oil_rocksdb_autovector
   oil_rocksdb_autovector.cpp
 )
+
+add_oil_api_test(oil_rocksdb_arena
+  oil_rocksdb_arena.cpp
+)
 # add_oil_api_test(oil_03_unique_ptr_tree
 #   oil_unique_ptr_tree.cpp
 # )
