@@ -21,7 +21,14 @@ func = """
 template<class K, class T, class H, class KE, class A>
 void getSizeType(const %1%<K, T, H, KE, A> &container, size_t& returnArg)
 {
+#ifdef __GLIBCXX__
+    using OI_value_type = typename %1%<K, T, H, KE, A>::value_type;
+    using OI_Hash_node = std::__detail::_Hash_node<
+        OI_value_type, std::__cache_default<K, H>::value>;
+    constexpr size_t nodeSize = sizeof(OI_Hash_node);
+#else
     constexpr size_t nodeSize = sizeof(typename %1%<K, T, H, KE, A>::node_type);
+#endif
     size_t bucketCount = container.bucket_count();
     size_t numElems = container.size();
 
@@ -40,7 +47,72 @@ void getSizeType(const %1%<K, T, H, KE, A> &container, size_t& returnArg)
 """
 
 traversal_func = """
-auto tail = returnArg
+auto tail = returnArg.delegate([&container](auto intervals) {
+#ifdef __GLIBCXX__
+  using OI_value_type = std::pair<const T0, T1>;
+  using OI_bucket = std::__detail::_Hash_node_base*;
+
+  // OIL stubs ignored template parameters such as the hasher, so libstdc++'s
+  // __cache_default cannot be trusted here: a dummy hasher may make the
+  // generated mirror node look like it has a cached hash code even when the
+  // target node does not. Size the interval to cover the node link plus the
+  // key/value payload, which is the target storage OIL can reliably identify.
+  static constexpr size_t OI_node_align =
+      alignof(std::__detail::_Hash_node_base) > alignof(OI_value_type)
+          ? alignof(std::__detail::_Hash_node_base)
+          : alignof(OI_value_type);
+  static constexpr size_t OI_value_offset =
+      (sizeof(std::__detail::_Hash_node_base) + alignof(OI_value_type) - 1) /
+      alignof(OI_value_type) * alignof(OI_value_type);
+  static constexpr size_t OI_node_interval_size =
+      (OI_value_offset + sizeof(OI_value_type) + OI_node_align - 1) /
+      OI_node_align * OI_node_align;
+
+  struct OI_Hashtable_layout {
+    OI_bucket* buckets;
+    size_t bucket_count;
+    std::__detail::_Hash_node_base before_begin;
+    size_t element_count;
+  };
+
+  const auto* layout = reinterpret_cast<const OI_Hashtable_layout*>(&container);
+  const bool has_bucket_array =
+      layout->buckets != nullptr && layout->bucket_count != 0;
+
+  auto contents = intervals.write(container.size() + (has_bucket_array ? 2 : 1));
+
+  // Interval 1: the std::unordered_map object itself.
+  contents = contents.delegate([&container](auto interval) {
+    return interval
+        .write(reinterpret_cast<uintptr_t>(&container))
+        .write(sizeof(container));
+  });
+
+  // Interval 2: the hashtable bucket array.
+  if (has_bucket_array) {
+    contents = contents.delegate([layout](auto interval) {
+      return interval
+          .write(reinterpret_cast<uintptr_t>(layout->buckets))
+          .write(layout->bucket_count * sizeof(OI_bucket));
+    });
+  }
+
+  // Remaining intervals: one separately allocated hash node per entry.
+  for (auto it = container.begin(); it != container.end(); ++it) {
+    const auto* node = it._M_cur;
+
+    contents = contents.delegate([node](auto interval) {
+      return interval
+          .write(reinterpret_cast<uintptr_t>(node))
+          .write(OI_node_interval_size);
+    });
+  }
+
+  return contents.finish();
+#else
+  static_assert(false && "No known unordered_map layout. See types/std_unordered_map_type.toml");
+#endif
+})
   .write((uintptr_t)&container)
   .write(container.bucket_count())
   .write(container.size());
@@ -56,6 +128,30 @@ for (const auto& kv : container) {
 }
 
 return tail.finish();
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
+func = """
+auto list = std::get<ParsedData::List>(d.val);
+
+el.va_intervals.clear();
+el.va_intervals.reserve(list.length);
+
+for (size_t i = 0; i < list.length; ++i) {
+  auto item = list.values();
+  auto pair = std::get<ParsedData::Pair>(item.val);
+
+  auto base = std::get<ParsedData::VarInt>(pair.first().val).value;
+  auto size = std::get<ParsedData::VarInt>(pair.second().val).value;
+
+  if (base != 0 && size != 0) {
+    el.va_intervals.push_back(result::Element::VAInterval{
+        .base = static_cast<uintptr_t>(base),
+        .size = static_cast<std::size_t>(size),
+    });
+  }
+}
 """
 
 [[codegen.processor]]
@@ -96,14 +192,21 @@ func = """
  * https://gcc.gnu.org/onlinedocs/libstdc++/latest-doxygen/a00536_source.html
  */
 using OI_value_type = std::pair<const T0, T1>;
-using OI_Hash_node =
-  std::__detail::_Hash_node<
-    OI_value_type,
-    std::__cache_default<OI_value_type, T2>::value>;
+using OI_bucket = std::__detail::_Hash_node_base*;
 
-using OI_bucket = std::__detail::_Hash_node_base;
-
-static constexpr size_t element_size = sizeof(OI_Hash_node);
+// See the matching traversal_func comment above. The generated hasher may be a
+// stub, so derive the stable node footprint from the link field and value
+// payload rather than from std::__detail::_Hash_node's cache-hash policy.
+static constexpr size_t OI_node_align =
+  alignof(std::__detail::_Hash_node_base) > alignof(OI_value_type)
+    ? alignof(std::__detail::_Hash_node_base)
+    : alignof(OI_value_type);
+static constexpr size_t OI_value_offset =
+  (sizeof(std::__detail::_Hash_node_base) + alignof(OI_value_type) - 1) /
+  alignof(OI_value_type) * alignof(OI_value_type);
+static constexpr size_t element_size =
+  (OI_value_offset + sizeof(OI_value_type) + OI_node_align - 1) /
+  OI_node_align * OI_node_align;
 static constexpr size_t bucket_size = sizeof(OI_bucket);
 #else
 static_assert(false && "No known element_size for sets. See types/set_type.toml");
