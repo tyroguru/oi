@@ -115,6 +115,10 @@ add_oil_api_test(oil_list_leaf_structs
   oil_list_leaf_structs.cpp
 )
 
+add_oil_api_test(oil_set_leaf_structs
+  oil_set_leaf_structs.cpp
+)
+
 add_oil_api_test(oil_deque_leaf_structs
   oil_deque_leaf_structs.cpp
 )
