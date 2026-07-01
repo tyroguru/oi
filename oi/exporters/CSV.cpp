@@ -17,7 +17,9 @@
 
 #include <algorithm>
 #include <ranges>
+#include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace oi::exporters {
 
@@ -58,6 +60,23 @@ std::string CSV::escapeField(std::string field) {
   return field;
 }
 
+std::string CSV::formatVAIntervals(
+    const std::vector<result::Element::VAInterval>& intervals) {
+  std::ostringstream out;
+
+  bool first = true;
+  for (const auto& interval : intervals) {
+    if (!std::exchange(first, false)) {
+      out << kListDelimiter;
+    }
+
+    out << "[0x" << std::hex << interval.base << ",0x"
+        << interval.base + interval.size << std::dec << ')';
+  }
+
+  return out.str();
+}
+
 void CSV::print(IntrospectionResult::const_iterator& it,
                 IntrospectionResult::const_iterator end) {
   printHeader();
@@ -70,6 +89,7 @@ void CSV::print(IntrospectionResult::const_iterator& it,
     out_ << escapeField(it->type_names) << kDelimiter;
     out_ << it->static_size << kDelimiter;
     out_ << it->exclusive_size << kDelimiter;
+    out_ << escapeField(formatVAIntervals(it->va_intervals)) << kDelimiter;
 
     if (!it->pointer.has_value()) {
       out_ << kDelimiter;

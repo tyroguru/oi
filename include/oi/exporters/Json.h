@@ -63,6 +63,9 @@ class Json {
   void printListField(std::string_view name,
                       const Rng& range,
                       std::string_view indent);
+  void printVAIntervalsField(
+      const std::vector<result::Element::VAInterval>& intervals,
+      std::string_view indent);
 
   void printFields(const result::Element&, std::string_view indent);
   template <typename El>
@@ -127,6 +130,26 @@ void Json::printListField(std::string_view name,
   out_ << "]," << endl() << indent;
 }
 
+inline void Json::printVAIntervalsField(
+    const std::vector<result::Element::VAInterval>& intervals,
+    std::string_view indent) {
+  out_ << tab() << "\"vaIntervals\":" << space() << '[';
+
+  bool first = true;
+  for (const auto& interval : intervals) {
+    if (!std::exchange(first, false)) {
+      out_ << ',' << space();
+    }
+
+    out_ << '{' << "\"start\":" << space() << "\"0x" << std::hex
+         << interval.base << "\"," << space() << "\"end\":" << space() << "\"0x"
+         << (interval.base + interval.size) << std::dec << "\"," << space()
+         << "\"size\":" << space() << interval.size << '}';
+  }
+
+  out_ << "]," << endl() << indent;
+}
+
 template <typename El>
 void Json::printFields(const result::SizedElement<El>& el,
                        std::string_view indent) {
@@ -142,6 +165,8 @@ inline void Json::printFields(const result::Element& el,
   printListField("typeNames", el.type_names, indent);
   printUnsignedField("staticSize", el.static_size, indent);
   printUnsignedField("exclusiveSize", el.exclusive_size, indent);
+  if (!el.va_intervals.empty())
+    printVAIntervalsField(el.va_intervals, indent);
   if (el.pointer.has_value())
     printUnsignedField("pointer", *el.pointer, indent);
 
