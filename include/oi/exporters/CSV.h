@@ -45,6 +45,7 @@ class CSV {
                                                   "typeNames",
                                                   "staticSize",
                                                   "exclusiveSize",
+                                                  "vaIntervals",
                                                   "pointer",
                                                   "length",
                                                   "capacity",
@@ -63,6 +64,8 @@ class CSV {
 
   static std::string escapeField(std::string_view);
   static std::string escapeField(std::string);
+  static std::string formatVAIntervals(
+      const std::vector<result::Element::VAInterval>&);
 };
 
 }  // namespace oi::exporters
