@@ -125,8 +125,9 @@ class OICompiler {
     std::array<char, 128> disassemblyBuffer;
   };
 
-  OICompiler(std::shared_ptr<SymbolService>, Config);
-  ~OICompiler();
+  OICompiler(std::shared_ptr<SymbolService> symbolService, Config cfg)
+      : symbols{std::move(symbolService)}, config{std::move(cfg)} {
+  }
 
   /**
    * Compile the given @param code and write the result in @param objectPath.
@@ -195,8 +196,20 @@ class OICompiler {
    * memory.
    * This is why memMgr is a std::unique_ptr in the class instead of a local
    * variable in the applyReloc function.
+   *
+   * A raw function-pointer deleter (rather than the default
+   * std::default_delete<OIMemoryManager>) means destroying this member - and
+   * therefore OICompiler's implicitly-generated constructor/destructor -
+   * never needs OIMemoryManager to be a complete type: the deleter is
+   * invoked indirectly through the stored pointer *value*, not by a
+   * statically-linked call to `delete`. Only OICompilerRelocs.cpp (which
+   * does have the complete type) ever assigns a non-null pointer+deleter
+   * pair, when applyRelocs() actually constructs one. This is what lets
+   * oilgen - which constructs an OICompiler but never calls applyRelocs() -
+   * link against OICompiler without pulling in SymbolService/drgn.
    */
-  std::unique_ptr<OIMemoryManager> memMgr;
+  std::unique_ptr<OIMemoryManager, void (*)(OIMemoryManager*)> memMgr{nullptr,
+                                                                      nullptr};
 };
 
 template <class FuncTextRange, class NeedlesRange>

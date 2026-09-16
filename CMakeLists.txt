@@ -346,13 +346,9 @@ add_subdirectory(oi)
 add_subdirectory(resources)
 add_library(oicore
   oi/Config.cpp
-  oi/Descs.cpp
   oi/Metrics.cpp
-  oi/OICache.cpp
   oi/OICompiler.cpp
-  oi/OICompilerRelocs.cpp
   oi/PaddingHunter.cpp
-  oi/Serialize.cpp
 )
 target_include_directories(oicore SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 target_compile_definitions(oicore PRIVATE ${LLVM_DEFINITIONS})
@@ -361,7 +357,6 @@ target_include_directories(oicore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 llvm_map_components_to_libnames(llvm_libs core native mcjit x86disassembler)
 target_link_libraries(oicore
   codegen
-  symbol_service
 
   ${Boost_LIBRARIES}
   Boost::headers
@@ -388,9 +383,27 @@ else()
 endif()
 
 target_link_libraries(oicore
+  pthread
+)
+
+# The runtime-only pieces of what used to be oicore: caching debugger info to
+# RocksDB (OICache/Serialize, which also need FuncDesc/GlobalDesc from
+# symbol_service's own Descs.cpp) and JIT relocation against a live remote
+# process (OICompilerRelocs). Kept out of oicore so that oilgen - which only
+# ever compiles code, never attaches to a process - doesn't need to link
+# against SymbolService/drgn.
+add_library(oiruntime_cache
+  oi/OICache.cpp
+  oi/OICompilerRelocs.cpp
+  oi/Serialize.cpp
+)
+target_include_directories(oiruntime_cache SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+target_compile_definitions(oiruntime_cache PRIVATE ${LLVM_DEFINITIONS})
+target_link_libraries(oiruntime_cache
+  oicore
+  symbol_service
   drgn
   dw
-  pthread
 )
 
 ### TreeBuilder
@@ -500,6 +513,7 @@ target_link_libraries(oil_jit_static
   PRIVATE
     codegen_drgn
     oicore
+    oiruntime_cache
     oil_static
 )
 
@@ -509,6 +523,7 @@ target_link_libraries(oil_jit_shared
   PRIVATE
     codegen_drgn
     oicore
+    oiruntime_cache
 )
 
 install(
@@ -572,7 +587,7 @@ target_link_libraries(oilgen
 
 ### Object Introspection explicit type generator
 add_executable(oil-typegen tools/OILTypeGen.cpp)
-target_link_libraries(oil-typegen codegen_drgn oicore)
+target_link_libraries(oil-typegen codegen_drgn oicore oiruntime_cache)
 if (STATIC_LINK)
   target_link_libraries(oil-typegen gflags_static)
 else()
@@ -581,7 +596,7 @@ endif()
 
 ### Object Introspection cache Printer (OIP)
 add_executable(oip tools/OIP.cpp)
-target_link_libraries(oip oicore)
+target_link_libraries(oip oicore oiruntime_cache)
 
 ### Object Introspection RocksDB Printer (OIRP)
 add_executable(oirp tools/OIRP.cpp)
@@ -592,12 +607,12 @@ target_link_libraries(oirp
 
 ### Object Introspection Tree Builder (OITB)
 add_executable(oitb tools/OITB.cpp)
-target_link_libraries(oitb oicore treebuilder)
+target_link_libraries(oitb oicore oiruntime_cache treebuilder)
 
 ### Object Introspection Debugger (OID)
 add_executable(oid oi/OID.cpp oi/OIDebugger.cpp)
 
-target_link_libraries(oid codegen_drgn oicore oid_parser treebuilder)
+target_link_libraries(oid codegen_drgn oicore oiruntime_cache oid_parser treebuilder)
 if (STATIC_LINK)
   target_link_libraries(oid gflags_static)
 else()

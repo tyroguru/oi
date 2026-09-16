@@ -104,7 +104,7 @@ cpp_unittest(
 cpp_unittest(
   NAME test_compiler
   SRCS test_compiler.cpp
-  DEPS oicore
+  DEPS oicore oiruntime_cache
 )
 
 cpp_unittest(

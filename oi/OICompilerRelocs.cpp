@@ -320,20 +320,6 @@ JITSymbol OIMemoryManager::findSymbol(const std::string& name) {
 }
 
 /*
- * The constructor and destructor must be declared/defined here, since the
- * header uses forward declarations with std::unique_ptr<OIMemoryManager>. Any
- * constructor's implicit exception-unwind path, as well as the destructor
- * itself, needs the complete type to know how to destroy `memMgr`. So both
- * must live in a translation unit which has the complete type information for
- * OIMemoryManager.
- */
-OICompiler::OICompiler(std::shared_ptr<SymbolService> symbolService, Config cfg)
-    : symbols{std::move(symbolService)}, config{std::move(cfg)} {
-}
-
-OICompiler::~OICompiler() = default;
-
-/*
  * Disassembles the opcodes housed in the Slabs' code segments.
  */
 static constexpr size_t kMaxInterFuncInstrPadding = 16;
@@ -398,7 +384,8 @@ std::optional<OICompiler::RelocResult> OICompiler::applyRelocs(
     const std::unordered_map<std::string, uintptr_t>& syntheticSymbols) {
   metrics::Tracing relocationTracing("relocation");
 
-  memMgr = std::make_unique<OIMemoryManager>(symbols, syntheticSymbols);
+  memMgr = {new OIMemoryManager(symbols, syntheticSymbols),
+            [](OIMemoryManager* p) { delete p; }};
   RuntimeDyld dyld(*memMgr, *memMgr);
 
   /* Load all the object files into the MemoryManager */
