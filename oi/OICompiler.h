@@ -30,7 +30,6 @@
 #include <unordered_map>
 
 #include "oi/Features.h"
-#include "oi/SymbolService.h"
 #include "oi/X86InstDefs.h"
 
 namespace oi::detail {
@@ -38,6 +37,7 @@ namespace oi::detail {
 namespace fs = std::filesystem;
 
 class OIMemoryManager;
+class SymbolService;
 
 /**
  * `OICompiler` provides the tools to compile and relocate code.

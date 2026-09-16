@@ -8,6 +8,7 @@
 #include <filesystem>
 
 #include "oi/OICompiler.h"
+#include "oi/SymbolService.h"
 
 using namespace oi::detail;
 

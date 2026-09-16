@@ -350,6 +350,7 @@ add_library(oicore
   oi/Metrics.cpp
   oi/OICache.cpp
   oi/OICompiler.cpp
+  oi/OICompilerRelocs.cpp
   oi/PaddingHunter.cpp
   oi/Serialize.cpp
 )
