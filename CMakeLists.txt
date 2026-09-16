@@ -23,7 +23,18 @@ option(CODE_COVERAGE "Enable code coverage" OFF)
 option(WITH_TESTS "Build with tests" ON)
 option(WITH_FLAKY_TESTS "Build with flaky tests" ON)
 option(FORCE_BOOST_STATIC "Build with static boost" ON)
-option(FORCE_LLVM_STATIC "Build with static llvm and clang" ON)
+# Default to OFF: the project's LLVM/Clang packages (e.g. via the Nix flake's
+# llvm16 devshell) are themselves built with LLVM_LINK_LLVM_DYLIB=ON, so
+# Clang's own exported CMake targets already depend on the shared `LLVM`
+# library regardless of this option. Turning it ON on such a toolchain makes
+# oicore *additionally* link the individual static LLVM component archives
+# (for MCJIT/disassembly), so the process ends up with two independent
+# copies of e.g. the X86 backend - one from the static archives, one from
+# inside libLLVM.so - which both register the same `llvm::cl::opt`s at
+# static-init time and abort with "CommandLine Error: Option '...'
+# registered more than once!". Only turn this ON for a toolchain you've
+# confirmed is NOT built with LLVM_LINK_LLVM_DYLIB.
+option(FORCE_LLVM_STATIC "Build with static llvm and clang" OFF)
 option(OIL_INSTALL_RUNTIME_BUNDLE "Install liboil shared-library runtime dependencies with OIL" OFF)
 option(OIL_INSTALL_SDK_CONFIG_BUNDLE "Install relocatable OIL SDK config, container descriptions, and compiler include roots" OFF)
 set(OIL_SDK_CONFIG_COMPILER "clang++" CACHE STRING "Compiler used to discover include roots for the installed OIL SDK config")
