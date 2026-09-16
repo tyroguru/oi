@@ -18,6 +18,7 @@
 #include <glog/logging.h>
 
 #include <boost/format.hpp>
+#include <cassert>
 #include <iostream>
 #include <numeric>
 #include <set>
@@ -560,7 +561,8 @@ void CodeGen::getClassSizeFuncDef(const Class& c, std::string& code) {
     return;
   }
 
-  getClassSizeFuncDefPolymorphic(c, code);
+  assert(getClassSizeFuncDefPolymorphicPtr_);
+  (this->*getClassSizeFuncDefPolymorphicPtr_)(c, code);
 }
 
 namespace {
@@ -1180,7 +1182,8 @@ void CodeGen::transform(TypeGraph& typeGraph) {
     pm.addPass(Prune::createPass());
 
   if (config_.features[Feature::PolymorphicInheritance]) {
-    addPolymorphicInheritanceChildren(pm, typeGraph);
+    assert(addPolymorphicInheritanceChildrenPtr_);
+    (this->*addPolymorphicInheritanceChildrenPtr_)(pm, typeGraph);
   }
 
   pm.addPass(RemoveMembers::createPass(config_.membersToStub));

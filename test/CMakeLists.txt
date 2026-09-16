@@ -61,6 +61,7 @@ target_compile_definitions(test_type_graph PRIVATE
 )
 target_link_libraries(test_type_graph
   codegen
+  codegen_drgn
   container_info
   type_graph
 

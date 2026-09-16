@@ -45,7 +45,12 @@ class CodeGen {
  public:
   CodeGen(const OICodeGenConfig& config);
   CodeGen(const OICodeGenConfig& config, SymbolService& symbols)
-      : config_(config), symbols_(&symbols) {
+      : config_(config),
+        symbols_(&symbols),
+        addPolymorphicInheritanceChildrenPtr_(
+            &CodeGen::addPolymorphicInheritanceChildren),
+        getClassSizeFuncDefPolymorphicPtr_(
+            &CodeGen::getClassSizeFuncDefPolymorphic) {
   }
 
   struct ExactName {
@@ -96,6 +101,16 @@ class CodeGen {
    * for the `Feature::PolymorphicInheritance` branch of `transform()`.
    * Defined in CodeGenDrgn.cpp, and only ever reached when this CodeGen was
    * constructed with a SymbolService (see the constructor's DCHECK).
+   *
+   * transform() calls this indirectly, through
+   * `addPolymorphicInheritanceChildrenPtr_`, rather than by name: CodeGen.cpp
+   * (part of the drgn-free `codegen` library) must never itself reference a
+   * symbol that only CodeGenDrgn.cpp (part of `codegen_drgn`) defines, or
+   * consumers which only use the 1-arg constructor (i.e. oilgen) would be
+   * unable to link without also pulling in SymbolService/drgn. Taking this
+   * function's address is confined to the 2-arg constructor above, which is
+   * only ever instantiated in translation units that already link
+   * codegen_drgn.
    */
   void addPolymorphicInheritanceChildren(type_graph::PassManager& pm,
                                          type_graph::TypeGraph& typeGraph);
@@ -111,7 +126,9 @@ class CodeGen {
    * The polymorphic-inheritance variant of `getClassSizeFuncDef`, which
    * resolves each concrete subclass's vtable address via SymbolService.
    * Defined in CodeGenDrgn.cpp; only reached when this CodeGen was
-   * constructed with a SymbolService (see the constructor's DCHECK).
+   * constructed with a SymbolService (see the constructor's DCHECK). Called
+   * indirectly via `getClassSizeFuncDefPolymorphicPtr_` - see the comment on
+   * `addPolymorphicInheritanceChildren` above for why.
    */
   void getClassSizeFuncDefPolymorphic(const type_graph::Class& c,
                                       std::string& code);
@@ -123,6 +140,11 @@ class CodeGen {
   void genClassTraversalFunction(const type_graph::Class& c, std::string& code);
   void genClassTreeBuilderInstructions(const type_graph::Class& c,
                                        std::string& code);
+
+  void (CodeGen::*addPolymorphicInheritanceChildrenPtr_)(
+      type_graph::PassManager&, type_graph::TypeGraph&) = nullptr;
+  void (CodeGen::*getClassSizeFuncDefPolymorphicPtr_)(const type_graph::Class&,
+                                                      std::string&) = nullptr;
 };
 
 }  // namespace oi::detail

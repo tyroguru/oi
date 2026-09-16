@@ -361,6 +361,7 @@ target_include_directories(oicore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 llvm_map_components_to_libnames(llvm_libs core native mcjit x86disassembler)
 target_link_libraries(oicore
   codegen
+  symbol_service
 
   ${Boost_LIBRARIES}
   Boost::headers
@@ -399,6 +400,7 @@ add_library(treebuilder
 )
 target_link_libraries(treebuilder
   RocksDB::rocksdb
+  codegen_drgn
   oicore # overkill but it does need a lot of stuff
 )
 
@@ -496,6 +498,7 @@ endforeach()
 
 target_link_libraries(oil_jit_static
   PRIVATE
+    codegen_drgn
     oicore
     oil_static
 )
@@ -504,6 +507,7 @@ target_link_libraries(oil_jit_shared
   PUBLIC
     oil_shared
   PRIVATE
+    codegen_drgn
     oicore
 )
 
@@ -568,7 +572,7 @@ target_link_libraries(oilgen
 
 ### Object Introspection explicit type generator
 add_executable(oil-typegen tools/OILTypeGen.cpp)
-target_link_libraries(oil-typegen oicore)
+target_link_libraries(oil-typegen codegen_drgn oicore)
 if (STATIC_LINK)
   target_link_libraries(oil-typegen gflags_static)
 else()
@@ -593,7 +597,7 @@ target_link_libraries(oitb oicore treebuilder)
 ### Object Introspection Debugger (OID)
 add_executable(oid oi/OID.cpp oi/OIDebugger.cpp)
 
-target_link_libraries(oid oicore oid_parser treebuilder)
+target_link_libraries(oid codegen_drgn oicore oid_parser treebuilder)
 if (STATIC_LINK)
   target_link_libraries(oid gflags_static)
 else()
