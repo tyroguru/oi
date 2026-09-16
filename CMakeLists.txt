@@ -580,7 +580,6 @@ add_executable(oilgen
   oi/OIGenerator.cpp
 )
 target_link_libraries(oilgen
-  drgn_utils
   oicore
   clangTooling
 )
