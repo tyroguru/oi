@@ -123,8 +123,7 @@ struct OICaptureKeys : public T {
 )";
 }
 
-void addPreprocessorDefines(const OICodeGen::Config& config,
-                            std::string& code) {
+void addPreprocessorDefines(const OICodeGenConfig& config, std::string& code) {
   for (const auto& define : config.preprocessorDefines) {
     const auto equals = define.find('=');
     code += "#define ";
@@ -141,7 +140,7 @@ void addPreprocessorDefines(const OICodeGen::Config& config,
 }
 
 void addIncludes(const TypeGraph& typeGraph,
-                 const OICodeGen::Config& config,
+                 const OICodeGenConfig& config,
                  std::string& code) {
   std::set<std::string_view> includes{"cstddef"};
   if (config.features[Feature::TreeBuilderV2]) {
@@ -340,7 +339,7 @@ void genDefsThriftClass(const Class& c, std::string& code) {
 
 }  // namespace
 
-CodeGen::CodeGen(const OICodeGen::Config& config) : config_(config) {
+CodeGen::CodeGen(const OICodeGenConfig& config) : config_(config) {
   DCHECK(!config.features[Feature::PolymorphicInheritance])
       << "polymorphic inheritance requires symbol service!";
 }

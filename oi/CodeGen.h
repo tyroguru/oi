@@ -25,10 +25,11 @@
 #include <vector>
 
 #include "ContainerInfo.h"
-#include "OICodeGen.h"
+#include "OICodeGenConfig.h"
 #include "type_graph/TypeGraph.h"
 
 struct drgn_type;
+struct TypeHierarchy;
 namespace oi::detail {
 class SymbolService;
 }
@@ -41,8 +42,8 @@ namespace oi::detail {
 
 class CodeGen {
  public:
-  CodeGen(const OICodeGen::Config& config);
-  CodeGen(const OICodeGen::Config& config, SymbolService& symbols)
+  CodeGen(const OICodeGenConfig& config);
+  CodeGen(const OICodeGenConfig& config, SymbolService& symbols)
       : config_(config), symbols_(&symbols) {
   }
 
@@ -78,7 +79,7 @@ class CodeGen {
 
  private:
   type_graph::TypeGraph typeGraph_;
-  const OICodeGen::Config& config_;
+  const OICodeGenConfig& config_;
   SymbolService* symbols_ = nullptr;
   std::vector<std::unique_ptr<ContainerInfo>> containerInfos_;
   std::unordered_set<const ContainerInfo*> definedContainers_;

@@ -20,7 +20,7 @@
 namespace oi::detail::type_graph {
 
 Pass KeyCapture::createPass(
-    const std::vector<OICodeGen::Config::KeyToCapture>& keysToCapture,
+    const std::vector<OICodeGenConfig::KeyToCapture>& keysToCapture,
     std::vector<std::unique_ptr<ContainerInfo>>& containerInfos) {
   auto fn = [&keysToCapture, &containerInfos](TypeGraph& typeGraph,
                                               NodeTracker& tracker) {

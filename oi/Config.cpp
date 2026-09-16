@@ -36,7 +36,7 @@ namespace {
 
 std::optional<FeatureSet> processConfigFile(const std::string& configFilePath,
                                             OICompiler::Config& compilerConfig,
-                                            OICodeGen::Config& generatorConfig);
+                                            OICodeGenConfig& generatorConfig);
 
 bool isValidMacroDefinition(std::string_view define) {
   const auto equals = define.find('=');
@@ -70,7 +70,7 @@ std::optional<FeatureSet> processConfigFiles(
     std::span<const fs::path> configFilePaths,
     std::map<Feature, bool> featureMap,
     OICompiler::Config& compilerConfig,
-    OICodeGen::Config& generatorConfig) {
+    OICodeGenConfig& generatorConfig) {
   FeatureSet enables;
   FeatureSet disables;
 
@@ -91,10 +91,9 @@ std::optional<FeatureSet> processConfigFiles(
 
 namespace {
 
-std::optional<FeatureSet> processConfigFile(
-    const std::string& configFilePath,
-    OICompiler::Config& compilerConfig,
-    OICodeGen::Config& generatorConfig) {
+std::optional<FeatureSet> processConfigFile(const std::string& configFilePath,
+                                            OICompiler::Config& compilerConfig,
+                                            OICodeGenConfig& generatorConfig) {
   fs::path configDirectory = fs::path{configFilePath}.remove_filename();
 
   toml::table config;
@@ -256,18 +255,18 @@ std::optional<FeatureSet> processConfigFile(
             auto* members = (*captureKeys)["members"].as_array();
             if (!members) {
               generatorConfig.keysToCapture.push_back(
-                  OICodeGen::Config::KeyToCapture{
+                  OICodeGenConfig::KeyToCapture{
                       type->value_or(""), "*", false});
             } else {
               for (auto&& member : *members) {
                 generatorConfig.keysToCapture.push_back(
-                    OICodeGen::Config::KeyToCapture{
+                    OICodeGenConfig::KeyToCapture{
                         type->value_or(""), member.value_or(""), false});
               }
             }
           } else if (topLevel) {
             generatorConfig.keysToCapture.push_back(
-                OICodeGen::Config::KeyToCapture{
+                OICodeGenConfig::KeyToCapture{
                     std::nullopt, std::nullopt, true});
           }
         }

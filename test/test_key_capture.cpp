@@ -7,7 +7,7 @@
 using namespace type_graph;
 
 TEST(KeyCaptureTest, InClass) {
-  std::vector<OICodeGen::Config::KeyToCapture> keysToCapture = {
+  std::vector<OICodeGenConfig::KeyToCapture> keysToCapture = {
       {"MyClass", "b"},
   };
   std::vector<std::unique_ptr<ContainerInfo>> containerInfos;
@@ -42,7 +42,7 @@ TEST(KeyCaptureTest, InClass) {
 }
 
 TEST(KeyCaptureTest, MapInMap) {
-  std::vector<OICodeGen::Config::KeyToCapture> keysToCapture = {
+  std::vector<OICodeGenConfig::KeyToCapture> keysToCapture = {
       {"MyClass", "a"},
   };
   std::vector<std::unique_ptr<ContainerInfo>> containerInfos;
@@ -77,7 +77,7 @@ TEST(KeyCaptureTest, MapInMap) {
 }
 
 TEST(KeyCaptureTest, Typedef) {
-  std::vector<OICodeGen::Config::KeyToCapture> keysToCapture = {
+  std::vector<OICodeGenConfig::KeyToCapture> keysToCapture = {
       {"MyClass", "a"},
   };
   std::vector<std::unique_ptr<ContainerInfo>> containerInfos;
@@ -106,7 +106,7 @@ TEST(KeyCaptureTest, Typedef) {
 }
 
 TEST(KeyCaptureTest, TopLevel) {
-  std::vector<OICodeGen::Config::KeyToCapture> keysToCapture = {
+  std::vector<OICodeGenConfig::KeyToCapture> keysToCapture = {
       {{}, {}, true},
   };
   std::vector<std::unique_ptr<ContainerInfo>> containerInfos;
@@ -129,7 +129,7 @@ TEST(KeyCaptureTest, TopLevel) {
 }
 
 TEST(KeyCaptureTest, TopLevelNotCaptured) {
-  std::vector<OICodeGen::Config::KeyToCapture> keysToCapture = {
+  std::vector<OICodeGenConfig::KeyToCapture> keysToCapture = {
       {"MyClass", "a"},
   };
   std::vector<std::unique_ptr<ContainerInfo>> containerInfos;

@@ -43,6 +43,7 @@ add_library(codegen
   CodeGen.cpp
   FuncGen.cpp
   OICodeGen.cpp
+  OICodeGenConfig.cpp
 )
 target_link_libraries(codegen
   container_info

@@ -28,6 +28,7 @@ struct irequest;
 #include "oi/ContainerInfo.h"
 #include "oi/Features.h"
 #include "oi/FuncGen.h"
+#include "oi/OICodeGenConfig.h"
 #include "oi/PaddingHunter.h"
 #include "oi/TypeHierarchy.h"
 
@@ -52,31 +53,7 @@ struct ParentMember {
 
 class OICodeGen {
  public:
-  struct Config {
-    Config() = default;
-    Config(const Config& other) = delete;
-    Config& operator=(const Config& other) = delete;
-    Config(Config&& other) = delete;
-    Config& operator=(Config&& other) = delete;
-
-    struct KeyToCapture {
-      std::optional<std::string> type;
-      std::optional<std::string> member;
-      bool topLevel = false;
-    };
-
-    FeatureSet features;
-    std::set<std::filesystem::path> containerConfigPaths;
-    std::set<std::string> defaultHeaders;
-    std::set<std::string> defaultNamespaces;
-    std::vector<std::string> preprocessorDefines;
-    std::vector<std::pair<std::string, std::string>> membersToStub;
-    std::vector<ContainerInfo> passThroughTypes;
-    std::vector<KeyToCapture> keysToCapture;
-
-    std::string toString() const;
-    std::vector<std::string> toOptions() const;
-  };
+  using Config = OICodeGenConfig;
 
   // TODO: Should folly::Range just be added as a container?
   static constexpr auto typesToStub = std::array{

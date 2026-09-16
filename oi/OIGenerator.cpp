@@ -40,6 +40,8 @@
 #include "oi/CodeGen.h"
 #include "oi/Config.h"
 #include "oi/Headers.h"
+#include "oi/OICodeGenConfig.h"
+#include "oi/OICompiler.h"
 #include "oi/type_graph/ClangTypeParser.h"
 #include "oi/type_graph/TypeGraph.h"
 #include "oi/type_graph/Types.h"
@@ -108,7 +110,7 @@ int OIGenerator::generate(clang::tooling::CompilationDatabase& db,
       {Feature::PruneTypeGraph, true},
   };
 
-  OICodeGen::Config generatorConfig{};
+  OICodeGenConfig generatorConfig{};
   OICompiler::Config compilerConfig{};
 
   auto features = config::processConfigFiles(
