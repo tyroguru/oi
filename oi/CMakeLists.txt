@@ -51,6 +51,7 @@ target_link_libraries(codegen
   resources
   symbol_service
   type_graph
+  type_graph_drgn
 
   Boost::headers
   ${Boost_LIBRARIES}

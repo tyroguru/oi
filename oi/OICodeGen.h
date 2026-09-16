@@ -55,31 +55,7 @@ class OICodeGen {
  public:
   using Config = OICodeGenConfig;
 
-  // TODO: Should folly::Range just be added as a container?
-  static constexpr auto typesToStub = std::array{
-      "SharedMutex",
-      "EnumMap",
-      "function",
-      "Function",
-      "ConcurrentHashMap",
-      "DelayedDestruction",
-      "McServerSession",
-      "Range",
-      "ReadResumableHandle",
-      "CountedIntrusiveList",
-      "EventBaseAtomicNotificationQueue",
-      /* Temporary IOBuf ring used for scattered read/write.
-       * It's only used for communication and should be empty the rest of the
-       * time. So we shouldn't loose too much visibility by stubbing it out.
-       */
-      "IOBufIovecBuilder",
-      /* struct event from libevent
-       * Its linked lists are not always initialised, leading to SegV in our JIT
-       * code. We can't stub the linked list themselves, as they're anonymous
-       * structs.
-       */
-      "event",
-  };
+  static constexpr auto& typesToStub = oiCodeGenTypesToStub;
 
  private:
   // Private constructor. Please use the fallible `OICodeGen::buildFromConfig`

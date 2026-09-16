@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <optional>
 #include <set>
@@ -26,6 +27,36 @@
 #include "oi/Features.h"
 
 namespace oi::detail {
+
+// Types which OICodeGen stubs out unconditionally. Kept alongside
+// OICodeGenConfig (rather than nested in OICodeGen, whose header pulls in
+// drgn) so that non-drgn consumers, like the type-graph EnforceCompatibility
+// pass, can reference it without depending on drgn.
+// TODO: Should folly::Range just be added as a container?
+inline constexpr auto oiCodeGenTypesToStub = std::array{
+    "SharedMutex",
+    "EnumMap",
+    "function",
+    "Function",
+    "ConcurrentHashMap",
+    "DelayedDestruction",
+    "McServerSession",
+    "Range",
+    "ReadResumableHandle",
+    "CountedIntrusiveList",
+    "EventBaseAtomicNotificationQueue",
+    /* Temporary IOBuf ring used for scattered read/write.
+     * It's only used for communication and should be empty the rest of the
+     * time. So we shouldn't loose too much visibility by stubbing it out.
+     */
+    "IOBufIovecBuilder",
+    /* struct event from libevent
+     * Its linked lists are not always initialised, leading to SegV in our JIT
+     * code. We can't stub the linked list themselves, as they're anonymous
+     * structs.
+     */
+    "event",
+};
 
 // Configuration for both `OICodeGen` (the legacy, drgn-based code generator)
 // and `CodeGen`/`ClangTypeParser` (the type-graph based code generator).
