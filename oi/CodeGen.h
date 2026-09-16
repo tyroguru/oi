@@ -36,6 +36,7 @@ class SymbolService;
 namespace oi::detail::type_graph {
 class Class;
 class Member;
+class PassManager;
 }  // namespace oi::detail::type_graph
 
 namespace oi::detail {
@@ -90,6 +91,15 @@ class CodeGen {
                        std::string& code,
                        RootFunctionName name);
 
+  /*
+   * Adds the drgn-based passes which discover a polymorphic type's children,
+   * for the `Feature::PolymorphicInheritance` branch of `transform()`.
+   * Defined in CodeGenDrgn.cpp, and only ever reached when this CodeGen was
+   * constructed with a SymbolService (see the constructor's DCHECK).
+   */
+  void addPolymorphicInheritanceChildren(type_graph::PassManager& pm,
+                                         type_graph::TypeGraph& typeGraph);
+
   void genDefsThrift(const type_graph::TypeGraph& typeGraph, std::string& code);
   void addGetSizeFuncDefs(const type_graph::TypeGraph& typeGraph,
                           std::string& code);
@@ -97,6 +107,14 @@ class CodeGen {
   void getClassSizeFuncConcrete(std::string_view funcName,
                                 const type_graph::Class& c,
                                 std::string& code) const;
+  /*
+   * The polymorphic-inheritance variant of `getClassSizeFuncDef`, which
+   * resolves each concrete subclass's vtable address via SymbolService.
+   * Defined in CodeGenDrgn.cpp; only reached when this CodeGen was
+   * constructed with a SymbolService (see the constructor's DCHECK).
+   */
+  void getClassSizeFuncDefPolymorphic(const type_graph::Class& c,
+                                      std::string& code);
   void addTypeHandlers(const type_graph::TypeGraph& typeGraph,
                        std::string& code);
 
