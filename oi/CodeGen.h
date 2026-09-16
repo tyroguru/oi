@@ -25,25 +25,32 @@
 #include <vector>
 
 #include "ContainerInfo.h"
-#include "OICodeGen.h"
+#include "OICodeGenConfig.h"
 #include "type_graph/TypeGraph.h"
 
 struct drgn_type;
+struct TypeHierarchy;
 namespace oi::detail {
 class SymbolService;
 }
 namespace oi::detail::type_graph {
 class Class;
 class Member;
+class PassManager;
 }  // namespace oi::detail::type_graph
 
 namespace oi::detail {
 
 class CodeGen {
  public:
-  CodeGen(const OICodeGen::Config& config);
-  CodeGen(const OICodeGen::Config& config, SymbolService& symbols)
-      : config_(config), symbols_(&symbols) {
+  CodeGen(const OICodeGenConfig& config);
+  CodeGen(const OICodeGenConfig& config, SymbolService& symbols)
+      : config_(config),
+        symbols_(&symbols),
+        addPolymorphicInheritanceChildrenPtr_(
+            &CodeGen::addPolymorphicInheritanceChildren),
+        getClassSizeFuncDefPolymorphicPtr_(
+            &CodeGen::getClassSizeFuncDefPolymorphic) {
   }
 
   struct ExactName {
@@ -78,7 +85,7 @@ class CodeGen {
 
  private:
   type_graph::TypeGraph typeGraph_;
-  const OICodeGen::Config& config_;
+  const OICodeGenConfig& config_;
   SymbolService* symbols_ = nullptr;
   std::vector<std::unique_ptr<ContainerInfo>> containerInfos_;
   std::unordered_set<const ContainerInfo*> definedContainers_;
@@ -89,6 +96,25 @@ class CodeGen {
                        std::string& code,
                        RootFunctionName name);
 
+  /*
+   * Adds the drgn-based passes which discover a polymorphic type's children,
+   * for the `Feature::PolymorphicInheritance` branch of `transform()`.
+   * Defined in CodeGenDrgn.cpp, and only ever reached when this CodeGen was
+   * constructed with a SymbolService (see the constructor's DCHECK).
+   *
+   * transform() calls this indirectly, through
+   * `addPolymorphicInheritanceChildrenPtr_`, rather than by name: CodeGen.cpp
+   * (part of the drgn-free `codegen` library) must never itself reference a
+   * symbol that only CodeGenDrgn.cpp (part of `codegen_drgn`) defines, or
+   * consumers which only use the 1-arg constructor (i.e. oilgen) would be
+   * unable to link without also pulling in SymbolService/drgn. Taking this
+   * function's address is confined to the 2-arg constructor above, which is
+   * only ever instantiated in translation units that already link
+   * codegen_drgn.
+   */
+  void addPolymorphicInheritanceChildren(type_graph::PassManager& pm,
+                                         type_graph::TypeGraph& typeGraph);
+
   void genDefsThrift(const type_graph::TypeGraph& typeGraph, std::string& code);
   void addGetSizeFuncDefs(const type_graph::TypeGraph& typeGraph,
                           std::string& code);
@@ -96,6 +122,16 @@ class CodeGen {
   void getClassSizeFuncConcrete(std::string_view funcName,
                                 const type_graph::Class& c,
                                 std::string& code) const;
+  /*
+   * The polymorphic-inheritance variant of `getClassSizeFuncDef`, which
+   * resolves each concrete subclass's vtable address via SymbolService.
+   * Defined in CodeGenDrgn.cpp; only reached when this CodeGen was
+   * constructed with a SymbolService (see the constructor's DCHECK). Called
+   * indirectly via `getClassSizeFuncDefPolymorphicPtr_` - see the comment on
+   * `addPolymorphicInheritanceChildren` above for why.
+   */
+  void getClassSizeFuncDefPolymorphic(const type_graph::Class& c,
+                                      std::string& code);
   void addTypeHandlers(const type_graph::TypeGraph& typeGraph,
                        std::string& code);
 
@@ -104,6 +140,11 @@ class CodeGen {
   void genClassTraversalFunction(const type_graph::Class& c, std::string& code);
   void genClassTreeBuilderInstructions(const type_graph::Class& c,
                                        std::string& code);
+
+  void (CodeGen::*addPolymorphicInheritanceChildrenPtr_)(
+      type_graph::PassManager&, type_graph::TypeGraph&) = nullptr;
+  void (CodeGen::*getClassSizeFuncDefPolymorphicPtr_)(const type_graph::Class&,
+                                                      std::string&) = nullptr;
 };
 
 }  // namespace oi::detail

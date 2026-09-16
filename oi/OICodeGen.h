@@ -28,6 +28,7 @@ struct irequest;
 #include "oi/ContainerInfo.h"
 #include "oi/Features.h"
 #include "oi/FuncGen.h"
+#include "oi/OICodeGenConfig.h"
 #include "oi/PaddingHunter.h"
 #include "oi/TypeHierarchy.h"
 
@@ -52,57 +53,9 @@ struct ParentMember {
 
 class OICodeGen {
  public:
-  struct Config {
-    Config() = default;
-    Config(const Config& other) = delete;
-    Config& operator=(const Config& other) = delete;
-    Config(Config&& other) = delete;
-    Config& operator=(Config&& other) = delete;
+  using Config = OICodeGenConfig;
 
-    struct KeyToCapture {
-      std::optional<std::string> type;
-      std::optional<std::string> member;
-      bool topLevel = false;
-    };
-
-    FeatureSet features;
-    std::set<std::filesystem::path> containerConfigPaths;
-    std::set<std::string> defaultHeaders;
-    std::set<std::string> defaultNamespaces;
-    std::vector<std::string> preprocessorDefines;
-    std::vector<std::pair<std::string, std::string>> membersToStub;
-    std::vector<ContainerInfo> passThroughTypes;
-    std::vector<KeyToCapture> keysToCapture;
-
-    std::string toString() const;
-    std::vector<std::string> toOptions() const;
-  };
-
-  // TODO: Should folly::Range just be added as a container?
-  static constexpr auto typesToStub = std::array{
-      "SharedMutex",
-      "EnumMap",
-      "function",
-      "Function",
-      "ConcurrentHashMap",
-      "DelayedDestruction",
-      "McServerSession",
-      "Range",
-      "ReadResumableHandle",
-      "CountedIntrusiveList",
-      "EventBaseAtomicNotificationQueue",
-      /* Temporary IOBuf ring used for scattered read/write.
-       * It's only used for communication and should be empty the rest of the
-       * time. So we shouldn't loose too much visibility by stubbing it out.
-       */
-      "IOBufIovecBuilder",
-      /* struct event from libevent
-       * Its linked lists are not always initialised, leading to SegV in our JIT
-       * code. We can't stub the linked list themselves, as they're anonymous
-       * structs.
-       */
-      "event",
-  };
+  static constexpr auto& typesToStub = oiCodeGenTypesToStub;
 
  private:
   // Private constructor. Please use the fallible `OICodeGen::buildFromConfig`

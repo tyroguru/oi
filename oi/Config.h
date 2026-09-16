@@ -21,7 +21,7 @@
 #include <span>
 
 #include "oi/Features.h"
-#include "oi/OICodeGen.h"
+#include "oi/OICodeGenConfig.h"
 #include "oi/OICompiler.h"
 
 namespace oi::detail::config {
@@ -30,6 +30,6 @@ std::optional<FeatureSet> processConfigFiles(
     std::span<const std::filesystem::path> configFilePaths,
     std::map<Feature, bool> featureMap,
     OICompiler::Config& compilerConfig,
-    OICodeGen::Config& generatorConfig);
+    OICodeGenConfig& generatorConfig);
 
 }  // namespace oi::detail::config

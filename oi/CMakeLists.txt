@@ -42,18 +42,31 @@ target_link_libraries(container_info
 add_library(codegen
   CodeGen.cpp
   FuncGen.cpp
-  OICodeGen.cpp
+  OICodeGenConfig.cpp
 )
 target_link_libraries(codegen
   container_info
   resources
-  symbol_service
   type_graph
 
   Boost::headers
   ${Boost_LIBRARIES}
   folly_headers
   glog::glog
+)
+
+# The legacy, drgn-based code generator (OICodeGen) and the drgn-only parts
+# of CodeGen (CodeGenDrgn.cpp), kept out of `codegen` so that consumers which
+# only ever generate code from a Clang AST (i.e. oilgen) don't need to link
+# against SymbolService/drgn.
+add_library(codegen_drgn
+  CodeGenDrgn.cpp
+  OICodeGen.cpp
+)
+target_link_libraries(codegen_drgn
+  codegen
+  symbol_service
+  type_graph_drgn
 )
 
 add_library(exporters_csv exporters/CSV.cpp)

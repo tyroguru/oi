@@ -24,6 +24,7 @@
 
 #include "oi/CodeGen.h"
 #include "oi/Features.h"
+#include "oi/OICodeGenConfig.h"
 #include "oi/OICompiler.h"
 
 namespace oi::detail {
@@ -78,7 +79,7 @@ class OILibraryImpl {
   GeneratorOptions opts_;
 
   oi::detail::OICompiler::Config compilerConfig_{};
-  oi::detail::OICodeGen::Config generatorConfig_{};
+  oi::detail::OICodeGenConfig generatorConfig_{};
 
   LocalTextSegment textSeg;
 

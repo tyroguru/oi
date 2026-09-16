@@ -19,10 +19,6 @@
 #include <filesystem>
 #include <vector>
 
-#include "oi/DrgnUtils.h"
-#include "oi/OICodeGen.h"
-#include "oi/OICompiler.h"
-
 namespace clang::tooling {
 class CompilationDatabase;
 }
@@ -37,13 +33,13 @@ class OIGenerator {
   int generate(clang::tooling::CompilationDatabase&,
                const std::vector<std::string>&);
 
-  void setOutputPath(fs::path _outputPath) {
+  void setOutputPath(std::filesystem::path _outputPath) {
     outputPath = std::move(_outputPath);
   }
-  void setConfigFilePaths(std::vector<fs::path> _configFilePaths) {
+  void setConfigFilePaths(std::vector<std::filesystem::path> _configFilePaths) {
     configFilePaths = std::move(_configFilePaths);
   }
-  void setSourceFileDumpPath(fs::path _sourceFileDumpPath) {
+  void setSourceFileDumpPath(std::filesystem::path _sourceFileDumpPath) {
     sourceFileDumpPath = std::move(_sourceFileDumpPath);
   }
   void setFailIfNothingGenerated(bool fail) {

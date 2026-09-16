@@ -19,7 +19,6 @@
 #include <glog/logging.h>
 
 #include <boost/algorithm/string.hpp>
-#include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/regex.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/format.hpp>
@@ -3727,43 +3726,6 @@ TypeHierarchy OICodeGen::getTypeHierarchy() {
       .thriftIssetStructTypes = thriftIssetStructTypes,
       .descendantClasses = descendantClasses,
   };
-}
-
-std::string OICodeGen::Config::toString() const {
-  using namespace std::string_literals;
-
-  // The list of ignored members must also be part of the remote hash
-  std::string ignoreMembers = "IgnoreMembers=";
-  for (const auto& ignore : membersToStub) {
-    ignoreMembers += ignore.first;
-    ignoreMembers += "::";
-    ignoreMembers += ignore.second;
-    ignoreMembers += ';';
-  }
-
-  std::string defines = "PreprocessorDefines=";
-  for (const auto& define : preprocessorDefines) {
-    defines += define;
-    defines += ';';
-  }
-
-  return boost::algorithm::join(toOptions(), ",") + "," + ignoreMembers + "," +
-         defines;
-}
-
-std::vector<std::string> OICodeGen::Config::toOptions() const {
-  std::vector<std::string> options;
-  options.reserve(allFeatures.size());
-
-  for (const auto f : allFeatures) {
-    if (features[f]) {
-      options.emplace_back(std::string("-f") + featureToStr(f));
-    } else {
-      options.emplace_back(std::string("-F") + featureToStr(f));
-    }
-  }
-
-  return options;
 }
 
 void OICodeGen::initializeCodeGen() {

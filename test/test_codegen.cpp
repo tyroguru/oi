@@ -18,7 +18,7 @@ template <typename T>
 using ref = std::reference_wrapper<T>;
 
 namespace {
-void testTransform(OICodeGen::Config& config,
+void testTransform(OICodeGenConfig& config,
                    std::string_view input,
                    std::string_view expectedAfter) {
   input.remove_prefix(1);  // Remove initial '\n'
@@ -44,7 +44,7 @@ void testTransform(OICodeGen::Config& config,
 }
 
 void testTransform(std::string_view input, std::string_view expectedAfter) {
-  OICodeGen::Config config;
+  OICodeGenConfig config;
   config.features[Feature::PruneTypeGraph] = true;
   config.features[Feature::TreeBuilderV2] = true;
   testTransform(config, input, expectedAfter);
@@ -114,7 +114,7 @@ TEST(CodeGenTest, TransformContainerAllocatorParamInParent) {
 }
 
 TEST(CodeGenTest, RemovedMemberAlignment) {
-  OICodeGen::Config config;
+  OICodeGenConfig config;
   config.membersToStub = {{"MyClass", "b"}};
   testTransform(config,
                 R"(
@@ -226,7 +226,7 @@ TEST(CodeGenTest, InheritFromContainer) {
 }
 
 TEST(CodeGenTest, InheritFromContainerCompat) {
-  OICodeGen::Config config;
+  OICodeGenConfig config;
   testTransform(config,
                 R"(
 [0] Class: MyClass (size: 24)

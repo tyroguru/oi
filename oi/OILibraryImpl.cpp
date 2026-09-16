@@ -28,6 +28,7 @@
 #include "oi/Config.h"
 #include "oi/DrgnUtils.h"
 #include "oi/Headers.h"
+#include "oi/SymbolService.h"
 
 namespace oi::detail {
 namespace {

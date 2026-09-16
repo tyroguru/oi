@@ -23,7 +23,7 @@
 #include "PassManager.h"
 #include "Types.h"
 #include "Visitor.h"
-#include "oi/OICodeGen.h"
+#include "oi/OICodeGenConfig.h"
 
 namespace oi::detail::type_graph {
 
@@ -35,12 +35,12 @@ namespace oi::detail::type_graph {
 class KeyCapture : public RecursiveVisitor {
  public:
   static Pass createPass(
-      const std::vector<OICodeGen::Config::KeyToCapture>& keysToCapture,
+      const std::vector<OICodeGenConfig::KeyToCapture>& keysToCapture,
       std::vector<std::unique_ptr<ContainerInfo>>& containerInfos);
 
   KeyCapture(NodeTracker& tracker,
              TypeGraph& typeGraph,
-             const std::vector<OICodeGen::Config::KeyToCapture>& keysToCapture,
+             const std::vector<OICodeGenConfig::KeyToCapture>& keysToCapture,
              std::vector<std::unique_ptr<ContainerInfo>>& containerInfos)
       : tracker_(tracker),
         typeGraph_(typeGraph),
@@ -57,7 +57,7 @@ class KeyCapture : public RecursiveVisitor {
  private:
   NodeTracker& tracker_;
   TypeGraph& typeGraph_;
-  const std::vector<OICodeGen::Config::KeyToCapture>& keysToCapture_;
+  const std::vector<OICodeGenConfig::KeyToCapture>& keysToCapture_;
   std::vector<std::unique_ptr<ContainerInfo>>& containerInfos_;
 
   void accept(Type& type) override;

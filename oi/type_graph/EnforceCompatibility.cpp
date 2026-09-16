@@ -22,7 +22,7 @@
 #include "Flattener.h"
 #include "TypeGraph.h"
 #include "TypeIdentifier.h"
-#include "oi/OICodeGen.h"
+#include "oi/OICodeGenConfig.h"
 
 namespace oi::detail::type_graph {
 
@@ -46,11 +46,11 @@ void EnforceCompatibility::accept(Type& type) {
 
 namespace {
 bool isTypeToStub(const Class& c) {
-  auto it = std::ranges::find_if(OICodeGen::typesToStub,
-                                 [&c](const auto& typeToStub) {
-                                   return c.name().starts_with(typeToStub);
-                                 });
-  return it != OICodeGen::typesToStub.end();
+  auto it =
+      std::ranges::find_if(oiCodeGenTypesToStub, [&c](const auto& typeToStub) {
+        return c.name().starts_with(typeToStub);
+      });
+  return it != oiCodeGenTypesToStub.end();
 }
 }  // namespace
 

@@ -61,6 +61,7 @@ target_compile_definitions(test_type_graph PRIVATE
 )
 target_link_libraries(test_type_graph
   codegen
+  codegen_drgn
   container_info
   type_graph
 
@@ -103,7 +104,7 @@ cpp_unittest(
 cpp_unittest(
   NAME test_compiler
   SRCS test_compiler.cpp
-  DEPS oicore
+  DEPS oicore oiruntime_cache
 )
 
 cpp_unittest(
