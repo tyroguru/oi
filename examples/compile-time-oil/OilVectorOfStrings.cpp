@@ -13,26 +13,43 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-#include <ObjectIntrospection.h>
+//
+// A minimal example of OIL's Ahead-of-Time (AOT) introspection path. See the
+// README in this directory for how the two-pass build (this file, then
+// `oilgen` parsing this same file) fits together, and why it's needed.
+//
+#include <oi/oi.h>
 
 #include <iostream>
 #include <string>
 #include <vector>
 
+// The type being introspected must have external linkage: it's used as a
+// template argument to a weak symbol that oilgen defines in a separate
+// object file, so it can't live in an anonymous namespace or be a local
+// class.
 struct Foo {
   std::vector<std::string> strings;
 };
 
 int main() {
   Foo foo;
-
   foo.strings.push_back("Lorem ipsum dolor");
   foo.strings.push_back("sit amet,");
   foo.strings.push_back("consectetur adipiscing elit,");
 
-  size_t size = -1;
-  int ret = ObjectIntrospection::getObjectSize(foo, size);
+  // oi::introspect<T>() throws if introspectImpl<T> was never generated -
+  // i.e. if the oilgen pass was skipped, or ran over a source file that
+  // doesn't instantiate oi::introspect<Foo>() the same way this one does.
+  const auto result = oi::introspect(foo);
 
-  std::cout << "oil returned: " << ret << "; with size: " << size << std::endl;
+  std::size_t count = 0;
+  for (const auto& element : result) {
+    std::cout << element.name << " static=" << element.static_size
+              << " exclusive=" << element.exclusive_size << '\n';
+    ++count;
+  }
+
+  std::cout << "elements=" << count << '\n';
+  return 0;
 }

@@ -1,6 +1,5 @@
-oilgen
 OilVectorOfStrings
 OilVectorOfStrings.o
+OilIntrospection.o
 jit.cpp
-JitCompiled.*.o
 
