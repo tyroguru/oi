@@ -68,9 +68,10 @@ following the Makefile here, that's the other reference to look at.
 
 ## Usage
 
-`oilgen` isn't currently part of OIL's installable CMake package (`find_package(oil)`
-only exports `liboil`/`liboil_jit`), so the only way to get it today is to
-build this monorepo:
+`oilgen` is part of OIL's installable CMake package (`find_package(oil)`
+exports it as `oil::oilgen`, alongside `liboil`/`liboil_jit`), so a real
+project would typically get it from an OIL install rather than building this
+monorepo. This example takes the simpler path of building it in-repo:
 
 ```sh
 # From the repo root, inside `nix develop`:

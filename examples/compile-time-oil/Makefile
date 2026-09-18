@@ -16,16 +16,9 @@ SYSTEM_INCLUDES := $(shell echo | $(CXX) -std=c++20 -E -x c++ -v - 2>&1 | \
 	sed -n '/#include <\.\.\.> search starts here/,/End of search list/p' | \
 	grep '^ ' | sed 's/^ /-isystem/')
 
-.PHONY: all clean run oilgen-bin
+.PHONY: all clean run
 
 all: OilVectorOfStrings
-
-# Build oilgen (and everything else in the repo) from the top-level project.
-# Real projects should not need this step: it exists here only because
-# oilgen isn't currently part of OIL's installable CMake package (see the
-# README), so the only way to get it today is to build this monorepo.
-oilgen-bin:
-	ninja -C ../../build oilgen
 
 $(OID_CONFIG):
 	../../tools/config_gen.py -c $(CXX) $(OID_CONFIG)
@@ -37,8 +30,10 @@ OilVectorOfStrings.o: OilVectorOfStrings.cpp
 	$(CXX) $(CXXFLAGS) $(INC) -c $< -o $@
 
 # Pass 2: run oilgen over the *same* source file to generate the missing
-# introspectImpl<Foo> definition as a second object file.
-OilIntrospection.o: OilVectorOfStrings.cpp oilgen-bin $(OID_CONFIG)
+# introspectImpl<Foo> definition as a second object file. See the README for
+# how to get oilgen itself (build it in this repo, or install OIL's CMake
+# package and use its oil::oilgen target/binary).
+OilIntrospection.o: OilVectorOfStrings.cpp $(OID_CONFIG)
 	$(OILGEN) --config-file=$(OID_CONFIG) --output=$@ $< \
 		-- $(CXXFLAGS) $(INC) $(SYSTEM_INCLUDES)
 
