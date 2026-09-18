@@ -1,3 +1,13 @@
 @PACKAGE_INIT@
 
 include("${CMAKE_CURRENT_LIST_DIR}/oilTargets.cmake")
+
+# Set only if this package was installed with OIL_INSTALL_SDK_CONFIG_BUNDLE=ON
+# (see InstallOilSdkConfig.cmake.in). Points at a relocatable oid.toml -
+# container definitions and compiler include roots already copied under the
+# install prefix - ready to pass straight to oil::oilgen as --config-file,
+# with no monorepo checkout or extra setup needed.
+set(OIL_SDK_CONFIG_FILE "${PACKAGE_PREFIX_DIR}/@OIL_SDK_CONFIG_PATH@")
+if(NOT EXISTS "${OIL_SDK_CONFIG_FILE}")
+  unset(OIL_SDK_CONFIG_FILE)
+endif()
