@@ -54,6 +54,17 @@ class PointerHashSet {
   std::array<uintptr_t, Size> data;
   size_t numEntries;
 
+  // Set once add() has refused an insert purely because the table was
+  // full, as opposed to the pointer already being present. Byte-accurate
+  // capture needs this distinction: today, every caller treats "already
+  // present" and "table full" identically (both mean "don't recurse into
+  // this pointer again"), which is fine for size-profiling but is a
+  // silent correctness gap for capture - an object graph with more than
+  // `Size` distinct live pointers would have some genuinely-unseen
+  // pointees silently skipped rather than captured. full() lets
+  // capture-mode code detect that and hard-fail instead.
+  bool full_ = false;
+
   /*
    * twang_mix64 hash function, taken from Folly where it is used as the
    * default hash function for 64-bit integers.
@@ -73,13 +84,15 @@ class PointerHashSet {
   void initialize() noexcept {
     data.fill(0);
     numEntries = 0;
+    full_ = false;
   }
 
   /*
    * Adds the pointer to the set.
    * Returns `true` if the value was newly added. `false` may be returned if
    * the value was already present, a null pointer was passed or if there are
-   * no entries left in the array.
+   * no entries left in the array. Use full() to tell the last case apart
+   * from a genuine duplicate.
    */
   bool add(uintptr_t pointer) noexcept {
     if (pointer == 0) {
@@ -96,12 +109,23 @@ class PointerHashSet {
         return true;
       }
 
-      if (entry == pointer || numEntries >= data.size()) {
+      if (entry == pointer) {
+        return false;
+      }
+
+      if (numEntries >= data.size()) {
+        full_ = true;
         return false;
       }
 
       index = (index + 1) % data.size();
     }
+  }
+
+  // True once add() has refused an insert purely because the table was
+  // full, as opposed to the pointer already being present.
+  bool full() const noexcept {
+    return full_;
   }
 
   size_t size(void) {
