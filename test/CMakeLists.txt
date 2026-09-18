@@ -179,3 +179,4 @@ set_tests_properties(oil_install_smoke_run_shared PROPERTIES
 )
 
 add_subdirectory(oil)
+add_subdirectory(oilgen)
