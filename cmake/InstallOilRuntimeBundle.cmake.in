@@ -1,14 +1,17 @@
 set(_oil_bundle_libdir "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_LIBDIR@")
+set(_oil_bundle_bindir "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_BINDIR@")
 set(_oil_bundle_dependency_dir "${_oil_bundle_libdir}/@OIL_RUNTIME_BUNDLE_DEPENDENCY_SUBDIR@")
 set(_oil_bundle_oil_rpath "@OIL_RUNTIME_BUNDLE_OIL_INSTALL_RPATH@")
+set(_oil_bundle_executable_rpath "@OIL_RUNTIME_BUNDLE_EXECUTABLE_INSTALL_RPATH@")
 set(_oil_bundle_dependency_rpath "@OIL_RUNTIME_BUNDLE_DEPENDENCY_INSTALL_RPATH@")
 string(REPLACE ";" ":" _oil_bundle_oil_patchelf_rpath "${_oil_bundle_oil_rpath}")
+string(REPLACE ";" ":" _oil_bundle_executable_patchelf_rpath "${_oil_bundle_executable_rpath}")
 string(REPLACE ";" ":" _oil_bundle_dependency_patchelf_rpath "${_oil_bundle_dependency_rpath}")
 set(_oil_bundle_patchelf "@PATCHELF_EXECUTABLE@")
 set(_oil_bundle_pre_exclude_regexes "@OIL_RUNTIME_BUNDLE_PRE_EXCLUDE_REGEXES@")
 
-if(NOT OIL_RUNTIME_BUNDLE_SEED_LIBRARIES)
-  message(FATAL_ERROR "OIL runtime bundle has no seed libraries")
+if(NOT OIL_RUNTIME_BUNDLE_SEED_LIBRARIES AND NOT OIL_RUNTIME_BUNDLE_SEED_EXECUTABLES)
+  message(FATAL_ERROR "OIL runtime bundle has no seed libraries or executables")
 endif()
 
 if(NOT EXISTS "${_oil_bundle_patchelf}")
@@ -17,16 +20,17 @@ endif()
 
 file(MAKE_DIRECTORY "${_oil_bundle_libdir}" "${_oil_bundle_dependency_dir}")
 
-set(_oil_bundle_seed_library_dirs "${_oil_bundle_libdir}")
-foreach(_oil_bundle_seed_library IN LISTS OIL_RUNTIME_BUNDLE_SEED_LIBRARIES)
-  get_filename_component(_oil_bundle_seed_library_dir "${_oil_bundle_seed_library}" DIRECTORY)
-  list(APPEND _oil_bundle_seed_library_dirs "${_oil_bundle_seed_library_dir}")
+set(_oil_bundle_seed_dirs "${_oil_bundle_libdir}" "${_oil_bundle_bindir}")
+foreach(_oil_bundle_seed IN LISTS OIL_RUNTIME_BUNDLE_SEED_LIBRARIES OIL_RUNTIME_BUNDLE_SEED_EXECUTABLES)
+  get_filename_component(_oil_bundle_seed_dir "${_oil_bundle_seed}" DIRECTORY)
+  list(APPEND _oil_bundle_seed_dirs "${_oil_bundle_seed_dir}")
 endforeach()
-list(REMOVE_DUPLICATES _oil_bundle_seed_library_dirs)
+list(REMOVE_DUPLICATES _oil_bundle_seed_dirs)
 
 file(GET_RUNTIME_DEPENDENCIES
   LIBRARIES ${OIL_RUNTIME_BUNDLE_SEED_LIBRARIES}
-  DIRECTORIES ${_oil_bundle_seed_library_dirs}
+  EXECUTABLES ${OIL_RUNTIME_BUNDLE_SEED_EXECUTABLES}
+  DIRECTORIES ${_oil_bundle_seed_dirs}
   RESOLVED_DEPENDENCIES_VAR _oil_bundle_resolved_dependencies
   UNRESOLVED_DEPENDENCIES_VAR _oil_bundle_unresolved_dependencies
   CONFLICTING_DEPENDENCIES_PREFIX _oil_bundle_conflicting_dependencies
@@ -62,19 +66,34 @@ foreach(_oil_bundle_dependency IN LISTS _oil_bundle_resolved_dependencies)
   )
 endforeach()
 
-file(GLOB _oil_bundle_installed_oil_libraries
-  "${_oil_bundle_libdir}/liboil.so*"
-  "${_oil_bundle_libdir}/liboil_jit.so*"
-)
+# Primary artifacts (the oil libraries and any bundled executables, e.g.
+# oilgen) get their rpath patched here too, alongside CMake's own
+# INSTALL_RPATH target property, as a belt-and-suspenders measure. Their
+# installed paths are derived directly from each seed's filename rather than
+# glob patterns, so this generalizes cleanly to any future seed without
+# needing a matching filename pattern added here.
+set(_oil_bundle_installed_oil_libraries)
+foreach(_oil_bundle_seed IN LISTS OIL_RUNTIME_BUNDLE_SEED_LIBRARIES)
+  get_filename_component(_oil_bundle_name "${_oil_bundle_seed}" NAME)
+  list(APPEND _oil_bundle_installed_oil_libraries "${_oil_bundle_libdir}/${_oil_bundle_name}")
+endforeach()
+
+set(_oil_bundle_installed_executables)
+foreach(_oil_bundle_seed IN LISTS OIL_RUNTIME_BUNDLE_SEED_EXECUTABLES)
+  get_filename_component(_oil_bundle_name "${_oil_bundle_seed}" NAME)
+  list(APPEND _oil_bundle_installed_executables "${_oil_bundle_bindir}/${_oil_bundle_name}")
+endforeach()
+
 file(GLOB _oil_bundle_installed_dependency_libraries
   "${_oil_bundle_dependency_dir}/*.so"
   "${_oil_bundle_dependency_dir}/*.so.*"
 )
 list(REMOVE_DUPLICATES _oil_bundle_installed_oil_libraries)
+list(REMOVE_DUPLICATES _oil_bundle_installed_executables)
 list(REMOVE_DUPLICATES _oil_bundle_installed_dependency_libraries)
 
 foreach(_oil_bundle_library IN LISTS _oil_bundle_installed_oil_libraries)
-  if(IS_SYMLINK "${_oil_bundle_library}")
+  if(NOT EXISTS "${_oil_bundle_library}" OR IS_SYMLINK "${_oil_bundle_library}")
     continue()
   endif()
 
@@ -88,6 +107,25 @@ foreach(_oil_bundle_library IN LISTS _oil_bundle_installed_oil_libraries)
   if(NOT _oil_bundle_patchelf_result EQUAL 0)
     message(FATAL_ERROR
       "Failed to patch rpath for ${_oil_bundle_library}:\n"
+      "${_oil_bundle_patchelf_stdout}${_oil_bundle_patchelf_stderr}")
+  endif()
+endforeach()
+
+foreach(_oil_bundle_executable IN LISTS _oil_bundle_installed_executables)
+  if(NOT EXISTS "${_oil_bundle_executable}" OR IS_SYMLINK "${_oil_bundle_executable}")
+    continue()
+  endif()
+
+  execute_process(
+    COMMAND "${_oil_bundle_patchelf}" --set-rpath "${_oil_bundle_executable_patchelf_rpath}" "${_oil_bundle_executable}"
+    RESULT_VARIABLE _oil_bundle_patchelf_result
+    OUTPUT_VARIABLE _oil_bundle_patchelf_stdout
+    ERROR_VARIABLE _oil_bundle_patchelf_stderr
+  )
+
+  if(NOT _oil_bundle_patchelf_result EQUAL 0)
+    message(FATAL_ERROR
+      "Failed to patch rpath for ${_oil_bundle_executable}:\n"
       "${_oil_bundle_patchelf_stdout}${_oil_bundle_patchelf_stderr}")
   endif()
 endforeach()

@@ -431,6 +431,21 @@ target_link_libraries(treebuilder
 
 include(GNUInstallDirs)
 
+# oilgen installs to CMAKE_INSTALL_BINDIR, a sibling of (not the same
+# directory as) CMAKE_INSTALL_LIBDIR, where the oil libraries and the
+# bundled runtime dependency directory both live. It therefore needs a
+# $ORIGIN RPATH with an extra hop back up to the prefix root first, rather
+# than the single-level hop that's sufficient for OIL_RUNTIME_BUNDLE_OIL_INSTALL_RPATH.
+# Computed via the FULL (always-absolute) install dirs, declared here (unlike
+# its sibling RPATH cache variables above) because it needs GNUInstallDirs,
+# so this stays correct regardless of the actual directory names (e.g. lib
+# vs lib64) or nesting depth of a given install layout.
+file(RELATIVE_PATH OIL_RUNTIME_BUNDLE_BIN_TO_DEPENDENCY_REL
+  "${CMAKE_INSTALL_FULL_BINDIR}"
+  "${CMAKE_INSTALL_FULL_LIBDIR}/${OIL_RUNTIME_BUNDLE_DEPENDENCY_SUBDIR}"
+)
+set(OIL_RUNTIME_BUNDLE_EXECUTABLE_INSTALL_RPATH "\$ORIGIN;\$ORIGIN/${OIL_RUNTIME_BUNDLE_BIN_TO_DEPENDENCY_REL}" CACHE STRING "Runtime search path for installed OIL executables (e.g. oilgen) needing the bundled runtime")
+
 ## OI Outputs
 ### Object Introspection as a Static Library (OIL)
 add_library(oil_static STATIC
@@ -549,28 +564,6 @@ install(
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-if(OIL_INSTALL_RUNTIME_BUNDLE)
-  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    message(FATAL_ERROR "OIL_INSTALL_RUNTIME_BUNDLE currently supports Linux ELF bundles only")
-  endif()
-
-  find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
-
-  configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallOilRuntimeBundle.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/cmake/InstallOilRuntimeBundle.cmake
-    @ONLY
-  )
-
-  install(CODE
-    "set(OIL_RUNTIME_BUNDLE_SEED_LIBRARIES
-  \"$<TARGET_FILE:oil_shared>\"
-  \"$<TARGET_FILE:oil_jit_shared>\"
-)
-include(\"${CMAKE_CURRENT_BINARY_DIR}/cmake/InstallOilRuntimeBundle.cmake\")"
-  )
-endif()
-
 if(OIL_INSTALL_SDK_CONFIG_BUNDLE)
   if(NOT PYTHON)
     message(FATAL_ERROR "OIL_INSTALL_SDK_CONFIG_BUNDLE requires python3")
@@ -594,6 +587,40 @@ target_link_libraries(oilgen
   oicore
   clangTooling
 )
+set_target_properties(oilgen PROPERTIES
+  INSTALL_RPATH "${OIL_RUNTIME_BUNDLE_EXECUTABLE_INSTALL_RPATH}"
+)
+
+install(
+  TARGETS oilgen
+  EXPORT oilTargets
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+if(OIL_INSTALL_RUNTIME_BUNDLE)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "OIL_INSTALL_RUNTIME_BUNDLE currently supports Linux ELF bundles only")
+  endif()
+
+  find_program(PATCHELF_EXECUTABLE patchelf REQUIRED)
+
+  configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallOilRuntimeBundle.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/cmake/InstallOilRuntimeBundle.cmake
+    @ONLY
+  )
+
+  install(CODE
+    "set(OIL_RUNTIME_BUNDLE_SEED_LIBRARIES
+  \"$<TARGET_FILE:oil_shared>\"
+  \"$<TARGET_FILE:oil_jit_shared>\"
+)
+set(OIL_RUNTIME_BUNDLE_SEED_EXECUTABLES
+  \"$<TARGET_FILE:oilgen>\"
+)
+include(\"${CMAKE_CURRENT_BINARY_DIR}/cmake/InstallOilRuntimeBundle.cmake\")"
+  )
+endif()
 
 ### Object Introspection explicit type generator
 add_executable(oil-typegen tools/OILTypeGen.cpp)
