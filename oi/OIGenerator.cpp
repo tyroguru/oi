@@ -21,6 +21,7 @@
 #include <clang/Frontend/CompilerInvocation.h>
 #include <clang/Frontend/FrontendAction.h>
 #include <clang/Sema/Sema.h>
+#include <clang/Tooling/ArgumentsAdjusters.h>
 #include <clang/Tooling/Tooling.h>
 #include <glog/logging.h>
 
@@ -151,6 +152,29 @@ int OIGenerator::generate(clang::tooling::CompilationDatabase& db,
   CreateTypeGraphActionFactory factory{ctx};
 
   clang::tooling::ClangTool tool{db, sourcePaths};
+
+  // The compilation database's own recorded flags aren't guaranteed to
+  // include the compiler's default include search paths - reconstructing
+  // those generally requires actually running the compiler driver as a
+  // subprocess (e.g. to expand a wrapper script's implicit flags), which
+  // ClangTool's in-process reinterpretation of the database doesn't do. Add
+  // whatever user/system header paths the config file supplies (see
+  // tools/config_gen.py) after the database's own flags, so they only fill
+  // gaps rather than override anything the database already specifies
+  // explicitly.
+  std::vector<std::string> configHeaderArgs;
+  for (const auto& path : compilerConfig.userHeaderPaths) {
+    configHeaderArgs.push_back("-I" + path.string());
+  }
+  for (const auto& path : compilerConfig.sysHeaderPaths) {
+    configHeaderArgs.push_back("-isystem");
+    configHeaderArgs.push_back(path.string());
+  }
+  if (!configHeaderArgs.empty()) {
+    tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
+        configHeaderArgs, clang::tooling::ArgumentInsertPosition::END));
+  }
+
   if (auto ret = tool.run(&factory); ret != 0) {
     return ret;
   }
