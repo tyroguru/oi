@@ -64,13 +64,19 @@ traversal_func = """
     const uint64_t dataIntervalSize =
         sso ? 0 : static_cast<uint64_t>((container.capacity() + 1) * sizeof(T0));
 
-    return returnArg.write(container.capacity())
+    auto tail = returnArg.write(container.capacity())
         .write(sso)
         .write(container.size())
         .write(objectBase)
         .write(objectIntervalSize)
         .write(dataBase)
         .write(dataIntervalSize);
+
+    return maybeCaptureBytes<oi_capture_bytes>(
+        tail,
+        std::span<const uint8_t>(
+            reinterpret_cast<const uint8_t*>(container.data()),
+            container.size() * sizeof(T0)));
 """
 
 # We could no doubt do this with some more compact typing with Pairs but
@@ -151,5 +157,13 @@ std::size_t size = static_cast<std::size_t>(
 
 if (!el.va_intervals.empty() && el.va_intervals.back().size == 0) {
   el.va_intervals.back().size = size;
+}
+"""
+
+[[codegen.processor]]
+type = "std::conditional_t<oi_capture_bytes, types::st::DynBytes<DB>, types::st::Unit<DB>>"
+func = """
+if constexpr (oi_capture_bytes) {
+  el.data = oi::result::Element::Bytes{std::get<ParsedData::DynBytes>(d.val).value};
 }
 """

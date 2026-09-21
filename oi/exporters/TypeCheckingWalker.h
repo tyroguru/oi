@@ -47,13 +47,16 @@ class TypeCheckingWalker {
   struct Bytes {
     std::vector<uint8_t> value;
   };
+  struct DynBytes {
+    std::vector<uint8_t> value;
+  };
   struct SumIndex {
     uint64_t index;
   };
   struct ListLength {
     uint64_t length;
   };
-  using Element = std::variant<VarInt, Bytes, SumIndex, ListLength>;
+  using Element = std::variant<VarInt, Bytes, DynBytes, SumIndex, ListLength>;
 
   TypeCheckingWalker(types::dy::Dynamic rootType,
                      std::span<const uint64_t> buffer)

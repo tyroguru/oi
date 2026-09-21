@@ -64,10 +64,20 @@ if (isStorageInline(container)) {
   category = Category::AlreadyAttributed;
 }
 
-return returnArg.write((uintptr_t)container.data())
+auto tail = returnArg.write((uintptr_t)container.data())
   .write(capacity)
   .write(container.size())
   .write(static_cast<std::underlying_type_t<Category>>(category));
+
+// Content capture is independent of the size-attribution category above
+// (which exists purely to avoid double-counting a shared/ref-counted
+// buffer's size): every fbstring instance gets its own content captured
+// regardless of whether its buffer was already attributed for sizing.
+return maybeCaptureBytes<oi_capture_bytes>(
+    tail,
+    std::span<const uint8_t>(
+        reinterpret_cast<const uint8_t*>(container.data()),
+        container.size() * sizeof(T0)));
 """
 
 [[codegen.processor]]
@@ -108,4 +118,12 @@ if (category == Category::InlinedStorage || category == Category::AlreadyAttribu
 el.exclusive_size += el.container_stats->capacity * sizeof(CharType);
 if (category == Category::ReferenceCountedStorage)
   el.exclusive_size += 8; // 8 bytes for std::atomic<size_t>
+"""
+
+[[codegen.processor]]
+type = "std::conditional_t<oi_capture_bytes, types::st::DynBytes<DB>, types::st::Unit<DB>>"
+func = """
+if constexpr (oi_capture_bytes) {
+  el.data = oi::result::Element::Bytes{std::get<ParsedData::DynBytes>(d.val).value};
+}
 """
