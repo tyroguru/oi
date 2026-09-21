@@ -125,6 +125,12 @@ cpp_unittest(
   DEPS treebuilder
 )
 
+cpp_unittest(
+  NAME parsed_data_test
+  SRCS ../oi/exporters/test/ParsedDataTest.cpp
+  DEPS oil_static
+)
+
 # Integration tests
 if (WITH_FLAKY_TESTS)
   add_test(

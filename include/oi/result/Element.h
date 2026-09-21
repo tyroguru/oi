@@ -45,6 +45,12 @@ struct Element {
   struct Scalar {
     uint64_t n;
   };
+  // A leaf's raw, uninterpreted in-memory bytes (see types::st::Bytes).
+  // Research groundwork for byte-accurate object capture; not populated by
+  // any TypeHandler unless Feature::CaptureBytes is enabled.
+  struct Bytes {
+    std::vector<uint8_t> value;
+  };
 
   /*
    * Virtual-address intervals directly occupied by this Element. Intervals
@@ -60,7 +66,7 @@ struct Element {
   size_t exclusive_size;
 
   std::optional<uintptr_t> pointer;
-  std::variant<std::nullopt_t, Pointer, Scalar, std::string> data = {
+  std::variant<std::nullopt_t, Pointer, Scalar, std::string, Bytes> data = {
       std::nullopt};
   std::optional<ContainerStats> container_stats;
   std::optional<IsSetStats> is_set_stats;

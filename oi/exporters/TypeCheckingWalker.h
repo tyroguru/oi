@@ -33,6 +33,7 @@
 #include <stack>
 #include <stdexcept>
 #include <variant>
+#include <vector>
 
 #include "oi/types/dy.h"
 
@@ -43,13 +44,16 @@ class TypeCheckingWalker {
   struct VarInt {
     uint64_t value;
   };
+  struct Bytes {
+    std::vector<uint8_t> value;
+  };
   struct SumIndex {
     uint64_t index;
   };
   struct ListLength {
     uint64_t length;
   };
-  using Element = std::variant<VarInt, SumIndex, ListLength>;
+  using Element = std::variant<VarInt, Bytes, SumIndex, ListLength>;
 
   TypeCheckingWalker(types::dy::Dynamic rootType,
                      std::span<const uint64_t> buffer)

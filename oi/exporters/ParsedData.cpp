@@ -37,6 +37,12 @@ ParsedData ParsedData::parse(std::vector<uint8_t>::const_iterator& it,
           return ParsedData::Unit{};
         } else if constexpr (std::is_same_v<T, types::dy::VarInt>) {
           return ParsedData::VarInt{.value = parseVarint(it)};
+        } else if constexpr (std::is_same_v<T, types::dy::Bytes>) {
+          std::vector<uint8_t> bytes(ty.length);
+          for (auto& b : bytes) {
+            b = *it++;
+          }
+          return ParsedData::Bytes{.value = std::move(bytes)};
         } else if constexpr (std::is_same_v<T, types::dy::Pair>) {
           return ParsedData::Pair{
               .first = Lazy{it, ty.first},
