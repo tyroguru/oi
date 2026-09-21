@@ -36,9 +36,15 @@ void getSizeType(const %1%<T, Traits, Allocator> &container, size_t& returnArg)
 traversal_func = """
     bool sso = isStorageInline(container);
 
-    return returnArg.write(container.capacity())
+    auto tail = returnArg.write(container.capacity())
         .write(sso)
         .write(container.size());
+
+    return maybeCaptureBytes<oi_capture_bytes>(
+        tail,
+        std::span<const uint8_t>(
+            reinterpret_cast<const uint8_t*>(container.data()),
+            container.size() * sizeof(T0)));
 """
 
 [[codegen.processor]]
@@ -60,4 +66,12 @@ if (!sso)
 type = "types::st::VarInt<DB>"
 func = """
 el.container_stats->length = std::get<ParsedData::VarInt>(d.val).value;
+"""
+
+[[codegen.processor]]
+type = "std::conditional_t<oi_capture_bytes, types::st::DynBytes<DB>, types::st::Unit<DB>>"
+func = """
+if constexpr (oi_capture_bytes) {
+  el.data = oi::result::Element::Bytes{std::get<ParsedData::DynBytes>(d.val).value};
+}
 """

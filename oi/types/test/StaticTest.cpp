@@ -50,6 +50,19 @@ TEST(StaticTypes, TestBytesToDynamic) {
   EXPECT_EQ(bytesType.length, 4u);
 }
 
+TEST(StaticTypes, TestDynBytesToDynamic) {
+  // ASSIGN
+  using ty = types::st::DynBytes<DummyDataBuffer>;
+
+  // ACT
+  types::dy::Dynamic dynamicType = ty::describe;
+
+  // ASSERT
+  ASSERT_TRUE(std::holds_alternative<
+              std::reference_wrapper<const types::dy::DynBytes>>(
+      dynamicType));
+}
+
 TEST(StaticTypes, TestPairToDynamic) {
   // ASSIGN
   using left = types::st::VarInt<DummyDataBuffer>;

@@ -16,6 +16,8 @@
 #ifndef INCLUDED_OI_TYPES_ST_H
 #define INCLUDED_OI_TYPES_ST_H 1
 
+#include <span>
+
 /*
  * Static Types
  *
@@ -71,6 +73,10 @@
  * then returns Unit. Unlike VarInt, it performs no numeric encoding - it
  * exists for byte-accurate capture of a leaf's exact in-memory
  * representation.
+ *
+ * DynBytes is Bytes' runtime-length counterpart, for payloads whose size
+ * (e.g. a string's content) isn't known until runtime - a VarInt length
+ * prefix followed by that many raw bytes.
  *
  * The compound stream types are:
  *
@@ -270,6 +276,51 @@ class Bytes {
 
 #ifdef DEFINE_DESCRIBE
   static constexpr types::dy::Bytes describe{N};
+#endif
+
+ private:
+  DataBuffer _buf;
+};
+
+/*
+ * DynBytes
+ *
+ * Represents a runtime-length, uninterpreted byte payload: a VarInt length
+ * prefix followed by that many raw bytes, written and read back unchanged.
+ * The runtime-length counterpart to Bytes<N> - for leaves whose size isn't
+ * known until runtime (e.g. a string's content), rather than baked into the
+ * type at compile time. Like List<T>, the length has to be written to the
+ * stream (unlike Bytes<N>, there's no compile-time N both sides already
+ * agree on), but unlike List<T> the payload is bulk uninterpreted bytes,
+ * not per-element dispatch.
+ */
+template <typename DataBuffer>
+class DynBytes {
+ public:
+  DynBytes(DataBuffer db) : _buf(db) {
+  }
+
+  Unit<DataBuffer> write(std::span<const uint8_t> bytes) {
+    uint64_t len = bytes.size();
+    while (len >= 0x80) {
+      _buf.write_byte(0x80 | (len & 0x7f));
+      len >>= 7;
+    }
+    _buf.write_byte(uint8_t(len));
+
+    for (uint8_t b : bytes) {
+      _buf.write_byte(b);
+    }
+    return Unit<DataBuffer>(_buf);
+  }
+
+  template <typename F>
+  Unit<DataBuffer> consume(F const& cb) {
+    return cb(*this);
+  }
+
+#ifdef DEFINE_DESCRIBE
+  static constexpr types::dy::DynBytes describe{};
 #endif
 
  private:

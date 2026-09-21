@@ -118,6 +118,57 @@ TEST(ParsedDataBytes, RoundTripsMultiByteStruct) {
   EXPECT_EQ(result.c, value.c);
 }
 
+TEST(ParsedDataBytes, DynBytesRoundTripsEmpty) {
+  std::vector<uint8_t> buf;
+  VectorDataBuffer db{buf};
+  using Writer = oi::types::st::DynBytes<VectorDataBuffer>;
+  Writer{db}.write(std::span<const uint8_t>{});
+
+  auto it = buf.cbegin();
+  ParsedData parsed = ParsedData::parse(it, Writer::describe);
+  EXPECT_TRUE(std::get<ParsedData::DynBytes>(parsed.val).value.empty());
+}
+
+TEST(ParsedDataBytes, DynBytesRoundTripsContent) {
+  // A byte value (0xff) that would corrupt under any signed/numeric
+  // reinterpretation, mirroring the point of the fixed-size Bytes tests
+  // above, since DynBytes shares the same "no numeric transform" property.
+  std::vector<uint8_t> source{0x12, 0xff, 0x00, 0x7f, 0x80};
+
+  std::vector<uint8_t> buf;
+  VectorDataBuffer db{buf};
+  using Writer = oi::types::st::DynBytes<VectorDataBuffer>;
+  Writer{db}.write(source);
+
+  auto it = buf.cbegin();
+  ParsedData parsed = ParsedData::parse(it, Writer::describe);
+  EXPECT_EQ(std::get<ParsedData::DynBytes>(parsed.val).value, source);
+}
+
+TEST(ParsedDataBytes, DynBytesFollowedByAnotherFieldStaysAligned) {
+  // The whole reason DynBytes needs a length prefix rather than reusing
+  // Bytes<N>: prove a decoder reading a DynBytes payload followed by
+  // something else lands exactly on the next field's first byte, not
+  // misaligned by a single byte's worth of drift.
+  std::vector<uint8_t> source{0xaa, 0xbb, 0xcc};
+
+  std::vector<uint8_t> buf;
+  VectorDataBuffer db{buf};
+  using DynWriter = oi::types::st::DynBytes<VectorDataBuffer>;
+  using PairWriter = oi::types::st::
+      Pair<VectorDataBuffer, DynWriter, oi::types::st::VarInt<VectorDataBuffer>>;
+  PairWriter{db}.write(source).write(42);
+
+  auto it = buf.cbegin();
+  using Shape = oi::types::st::
+      Pair<VectorDataBuffer, DynWriter, oi::types::st::VarInt<VectorDataBuffer>>;
+  ParsedData parsed = ParsedData::parse(it, Shape::describe);
+  auto pair = std::get<ParsedData::Pair>(parsed.val);
+
+  EXPECT_EQ(std::get<ParsedData::DynBytes>(pair.first().val).value, source);
+  EXPECT_EQ(std::get<ParsedData::VarInt>(pair.second().val).value, 42u);
+}
+
 // Baseline/control: confirms this file's own write+parse test methodology
 // is sound against the pre-existing VarInt primitive, not just the new one.
 TEST(ParsedDataBytes, ControlVarIntStillRoundTrips) {

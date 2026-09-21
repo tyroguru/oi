@@ -206,3 +206,44 @@ TEST(TypeCheckingWalker, TestBytes) {
 
   ASSERT_FALSE(second.has_value());
 }
+
+TEST(TypeCheckingWalker, TestDynBytesEmpty) {
+  // ASSIGN
+  std::vector<uint64_t> data{0};
+
+  types::dy::DynBytes rootType;
+
+  TypeCheckingWalker walker(rootType, data);
+
+  // ACT
+  auto first = walker.advance();
+  auto second = walker.advance();
+
+  // ASSERT
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(std::holds_alternative<TypeCheckingWalker::DynBytes>(*first));
+  EXPECT_TRUE(std::get<TypeCheckingWalker::DynBytes>(*first).value.empty());
+
+  ASSERT_FALSE(second.has_value());
+}
+
+TEST(TypeCheckingWalker, TestDynBytesSome) {
+  // ASSIGN
+  std::vector<uint64_t> data{3, 0x12, 0xff, 0x00};
+
+  types::dy::DynBytes rootType;
+
+  TypeCheckingWalker walker(rootType, data);
+
+  // ACT
+  auto first = walker.advance();
+  auto second = walker.advance();
+
+  // ASSERT
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(std::holds_alternative<TypeCheckingWalker::DynBytes>(*first));
+  EXPECT_EQ(std::get<TypeCheckingWalker::DynBytes>(*first).value,
+            (std::vector<uint8_t>{0x12, 0xff, 0x00}));
+
+  ASSERT_FALSE(second.has_value());
+}

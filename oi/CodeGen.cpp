@@ -1071,6 +1071,28 @@ void addCaptureKeySupport(std::string& code) {
   )";
 }
 
+void addCaptureBytesSupport(std::string& code) {
+  code += R"(
+    // Conditionally writes a runtime-length raw byte span (e.g. a string's
+    // content) instead of nothing. Used by container definitions whose
+    // traversal_func has its own content to offer beyond what the generic
+    // per-element TypeHandler dispatch reaches (std::string and friends
+    // don't walk per-character). returnArg's type is already exactly
+    // DynBytes<DB> (CaptureBytes on) or Unit<DB> (off), via the same
+    // std::conditional_t<oi_capture_bytes, ...> pattern captureKeys uses
+    // for its own processor type - no delegation needed, just a direct
+    // write or a pass-through.
+    template <bool CaptureBytes>
+    auto maybeCaptureBytes(auto returnArg, std::span<const uint8_t> bytes) {
+      if constexpr (CaptureBytes) {
+        return returnArg.write(bytes);
+      } else {
+        return returnArg;
+      }
+    }
+  )";
+}
+
 void addThriftIssetSupport(std::string& code) {
   code += R"(
 void processThriftIsset(result::Element& el, std::function<void(inst::Inst)> stack_ins, ParsedData d) {
@@ -1095,6 +1117,7 @@ void addStandardTypeHandlers(TypeGraph& typeGraph,
                              FeatureSet features,
                              std::string& code) {
   addCaptureKeySupport(code);
+  addCaptureBytesSupport(code);
   if (features[Feature::CaptureThriftIsset])
     addThriftIssetSupport(code);
 

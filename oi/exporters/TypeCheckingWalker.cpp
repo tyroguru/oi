@@ -54,6 +54,17 @@ std::optional<TypeCheckingWalker::Element> TypeCheckingWalker::advance() {
             bytes.push_back(static_cast<uint8_t>(popFront()));
           }
           return TypeCheckingWalker::Bytes{std::move(bytes)};
+        } else if constexpr (std::is_same_v<T, types::dy::DynBytes>) {
+          // Same one-slot-per-value model as the Bytes case above, plus a
+          // length slot first (matching how List pops one slot for its
+          // length too).
+          uint64_t length = popFront();
+          std::vector<uint8_t> bytes;
+          bytes.reserve(length);
+          for (uint64_t i = 0; i < length; i++) {
+            bytes.push_back(static_cast<uint8_t>(popFront()));
+          }
+          return TypeCheckingWalker::DynBytes{std::move(bytes)};
         } else if constexpr (std::is_same_v<T, types::dy::Pair>) {
           // Pair type - read all of left then all of right. Recurse to get the
           // values.
