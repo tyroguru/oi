@@ -92,6 +92,7 @@ class ConsumerContext {
   const std::vector<std::unique_ptr<ContainerInfo>>& containerInfos;
   std::set<std::string_view> typesToStub;
   std::set<std::string_view> mustProcessTemplateParams;
+  bool chaseRawPointers = false;
 
  private:
   clang::Sema* sema = nullptr;
@@ -140,6 +141,7 @@ int OIGenerator::generate(clang::tooling::CompilationDatabase& db,
   }
 
   ConsumerContext ctx{containerInfos};
+  ctx.chaseRawPointers = generatorConfig.features[Feature::ChaseRawPointers];
 
   for (const auto& [stubType, stubMember] : generatorConfig.membersToStub) {
     if (stubMember == "*")
@@ -280,6 +282,7 @@ class CreateTypeGraphConsumer : public clang::ASTConsumer {
     type_graph::ClangTypeParserOptions opts;
     opts.typesToStub = ctx.typesToStub;
     opts.mustProcessTemplateParams = ctx.mustProcessTemplateParams;
+    opts.chaseRawPointers = ctx.chaseRawPointers;
 
     type_graph::ClangTypeParser parser{ctx.typeGraph, ctx.containerInfos, opts};
 
