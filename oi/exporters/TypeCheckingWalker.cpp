@@ -41,6 +41,19 @@ std::optional<TypeCheckingWalker::Element> TypeCheckingWalker::advance() {
         } else if constexpr (std::is_same_v<T, types::dy::VarInt>) {
           // VarInt type - pop one element and return as a `VarInt`.
           return TypeCheckingWalker::VarInt{popFront()};
+        } else if constexpr (std::is_same_v<T, types::dy::Bytes>) {
+          // Bytes type - pop `length` elements, one per byte, and return as
+          // a `Bytes`. Note this walker treats the buffer as one already-
+          // decoded value per slot (see the VarInt case above, which pops
+          // exactly one slot regardless of the real wire format's
+          // variable-length continuation-bit encoding); consistent with
+          // that existing model, each byte occupies one slot here too.
+          std::vector<uint8_t> bytes;
+          bytes.reserve(ty.length);
+          for (size_t i = 0; i < ty.length; i++) {
+            bytes.push_back(static_cast<uint8_t>(popFront()));
+          }
+          return TypeCheckingWalker::Bytes{std::move(bytes)};
         } else if constexpr (std::is_same_v<T, types::dy::Pair>) {
           // Pair type - read all of left then all of right. Recurse to get the
           // values.

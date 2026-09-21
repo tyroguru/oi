@@ -153,6 +153,9 @@ void addIncludes(const TypeGraph& typeGraph,
   if (config.features[Feature::JitTiming]) {
     includes.emplace("chrono");
   }
+  if (config.features[Feature::CaptureBytes]) {
+    includes.emplace("bit");
+  }
   for (const Type& t : typeGraph.finalTypes) {
     if (const auto* c = dynamic_cast<const Container*>(&t)) {
       includes.emplace(c->containerInfo_.header);
@@ -1273,7 +1276,7 @@ void CodeGen::generate(TypeGraph& typeGraph,
   }
 
   if (config_.features[Feature::TreeBuilderV2]) {
-    FuncGen::DefineBasicTypeHandlers(code);
+    FuncGen::DefineBasicTypeHandlers(code, config_.features);
     addStandardTypeHandlers(typeGraph, config_.features, code);
     addTypeHandlers(typeGraph, code);
   } else {

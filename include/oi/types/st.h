@@ -62,6 +62,16 @@
  * VarInt writes one unsigned integer value using variable-length encoding and
  * then returns Unit.
  *
+ * The other primitive stream type is:
+ *
+ * Bytes<N>
+ * --------
+ *
+ * Bytes writes N raw, uninterpreted bytes (N a compile-time constant) and
+ * then returns Unit. Unlike VarInt, it performs no numeric encoding - it
+ * exists for byte-accurate capture of a leaf's exact in-memory
+ * representation.
+ *
  * The compound stream types are:
  *
  *    Pair<DB, First, Rest>
@@ -220,6 +230,46 @@ class VarInt {
 
 #ifdef DEFINE_DESCRIBE
   static constexpr types::dy::VarInt describe{};
+#endif
+
+ private:
+  DataBuffer _buf;
+};
+
+/*
+ * Bytes<N>
+ *
+ * Represents a fixed-size, uninterpreted byte payload: exactly N raw bytes,
+ * written and read back unchanged. Unlike VarInt, which is a variable-length
+ * encoding of an unsigned integer *value*, Bytes carries no numeric meaning
+ * and applies no transform - it exists for byte-accurate capture of a leaf's
+ * in-memory representation (e.g. `std::bit_cast<std::array<uint8_t, sizeof(T)>>(t)`
+ * for a scalar T), where any interpretation (signedness, floating point bit
+ * patterns, NaNs) must survive unmodified. N is a compile-time constant known
+ * identically by both the writer and reader (the same type graph, generated
+ * for the same binary), so - like VarInt's continuation-bit encoding - no
+ * separate length needs to be written to the stream.
+ */
+template <typename DataBuffer, size_t N>
+class Bytes {
+ public:
+  Bytes(DataBuffer db) : _buf(db) {
+  }
+
+  Unit<DataBuffer> write(std::array<uint8_t, N> bytes) {
+    for (uint8_t b : bytes) {
+      _buf.write_byte(b);
+    }
+    return Unit<DataBuffer>(_buf);
+  }
+
+  template <typename F>
+  Unit<DataBuffer> consume(F const& cb) {
+    return cb(*this);
+  }
+
+#ifdef DEFINE_DESCRIBE
+  static constexpr types::dy::Bytes describe{N};
 #endif
 
  private:

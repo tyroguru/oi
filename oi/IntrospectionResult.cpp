@@ -136,6 +136,10 @@ std::optional<std::string> genNameFromData(
           out += std::to_string(d.n);
           out += ']';
           return out;
+        } else if constexpr (std::is_same_v<result::Element::Bytes, V>) {
+          // Raw captured bytes have no obviously useful short name - leave
+          // the name unaugmented, same as the "no data" case below.
+          return std::nullopt;
         } else if constexpr (std::is_same_v<std::nullopt_t, V>) {
           return std::nullopt;
         } else {

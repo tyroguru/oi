@@ -44,6 +44,10 @@ std::optional<std::string_view> featureHelp(Feature f) {
       return std::nullopt;  // Hide in OID help
     case Feature::TreeBuilderV2:
       return "Use Tree Builder v2 for reading the data segment";
+    case Feature::CaptureBytes:
+      return "Write a scalar leaf's raw in-memory bytes instead of derived "
+             "stats. Research groundwork for byte-accurate object capture; "
+             "not consumed by any exporter yet.";
     case Feature::GenJitDebug:
       return "Generate debug information for the JIT object.";
     case Feature::JitLogging:
@@ -66,6 +70,9 @@ std::span<const Feature> requirements(Feature f) {
     case Feature::Library:
       static constexpr std::array lib = {Feature::TreeBuilderV2};
       return lib;
+    case Feature::CaptureBytes:
+      static constexpr std::array cb = {Feature::TreeBuilderV2};
+      return cb;
     default:
       return {};
   }

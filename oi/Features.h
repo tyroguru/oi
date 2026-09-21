@@ -31,6 +31,7 @@
   X(PruneTypeGraph, "prune-type-graph")         \
   X(Library, "library")                         \
   X(TreeBuilderV2, "tree-builder-v2")           \
+  X(CaptureBytes, "capture-bytes")              \
   X(GenJitDebug, "gen-jit-debug")               \
   X(JitLogging, "jit-logging")                  \
   X(JitTiming, "jit-timing")                    \

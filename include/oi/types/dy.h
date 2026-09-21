@@ -47,6 +47,7 @@ namespace oi::types::dy {
 
 struct Unit;
 struct VarInt;
+struct Bytes;
 struct Pair;
 struct Sum;
 struct List;
@@ -59,12 +60,20 @@ struct List;
  */
 using Dynamic = std::variant<std::reference_wrapper<const Unit>,
                              std::reference_wrapper<const VarInt>,
+                             std::reference_wrapper<const Bytes>,
                              std::reference_wrapper<const Pair>,
                              std::reference_wrapper<const Sum>,
                              std::reference_wrapper<const List> >;
 
 struct Unit {};
 struct VarInt {};
+
+struct Bytes {
+  constexpr Bytes(size_t length_) : length(length_) {
+  }
+
+  size_t length;
+};
 
 struct Pair {
   constexpr Pair(Dynamic first_, Dynamic second_)

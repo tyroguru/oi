@@ -19,7 +19,9 @@
 #include <oi/IntrospectionResult.h>
 #include <oi/result/SizedResult.h>
 
+#include <iomanip>
 #include <ostream>
+#include <sstream>
 #include <string_view>
 
 namespace oi::exporters {
@@ -176,6 +178,13 @@ inline void Json::printFields(const result::Element& el,
     printPointerField("data", p->p, indent);
   } else if (const auto* str = std::get_if<std::string>(&el.data)) {
     printStringField("data", *str, indent);
+  } else if (const auto* bytes = std::get_if<result::Element::Bytes>(&el.data)) {
+    std::ostringstream hex;
+    hex << std::hex << std::setfill('0');
+    for (uint8_t b : bytes->value) {
+      hex << std::setw(2) << static_cast<int>(b);
+    }
+    printStringField("data", hex.str(), indent);
   }
 
   if (el.container_stats.has_value()) {

@@ -612,16 +612,23 @@ class BackInserter {
  * DefineBasicTypeHandlers
  *
  * Provides TypeHandler implementations for types T, T*, and void. T is of type
- * Unit type and stores nothing. It should be overridden to provide an
- * implementation. T* is of type Pair<VarInt, Sum<Unit, T::type>. It stores the
- * pointer's value always, then the value of the pointer if it is unique. void
- * is of type Unit and always stores nothing.
+ * Unit type and stores nothing, unless Feature::CaptureBytes is enabled, in
+ * which case a complete, trivially-copyable, non-pointer T instead writes its
+ * own raw in-memory bytes (see types::st::Bytes) - research groundwork for
+ * byte-accurate object capture, not yet consumed by any exporter. T* is of
+ * type Pair<VarInt, Sum<Unit, T::type>. It stores the pointer's value always,
+ * then the value of the pointer if it is unique. void is of type Unit and
+ * always stores nothing.
  */
-void FuncGen::DefineBasicTypeHandlers(std::string& code) {
+void FuncGen::DefineBasicTypeHandlers(std::string& code, FeatureSet features) {
   code += R"(
 template <typename Ctx, typename T>
 struct TypeHandler;
 )";
+
+  code += "constexpr bool oi_capture_bytes = ";
+  code += (features[Feature::CaptureBytes] ? "true" : "false");
+  code += ";\n";
 
   code += R"(
 template <typename Ctx, typename T>
@@ -664,6 +671,22 @@ struct TypeHandler {
       stack_ins(childField);
     }
   }
+  static void process_captured_bytes(result::Element& el,
+                                     std::function<void(inst::Inst)> stack_ins,
+                                     ParsedData d) {
+    el.data =
+        result::Element::Bytes{std::get<ParsedData::Bytes>(d.val).value};
+  }
+
+  // Non-pointer leaf T writes its own raw bytes instead of Unit only when
+  // capture mode is on *and* T is something bit_cast can actually be used
+  // on: a synthetic incomplete-pointee marker (see oi_is_complete) has no
+  // bytes to write, and any non-trivially-copyable type reaching this
+  // generic fallback (rather than its own dedicated TypeHandler
+  // specialization) falls back to Unit rather than a hard compile error.
+  static constexpr bool kWriteBytes = !std::is_pointer_v<T> &&
+                                      oi_capture_bytes && oi_is_complete<T> &&
+                                      std::is_trivially_copyable_v<T>;
 
   static auto choose_type() {
     if constexpr (std::is_pointer_v<T>) {
@@ -674,6 +697,8 @@ struct TypeHandler {
               DB,
               types::st::Unit<DB>,
               typename TypeHandler<Ctx, std::remove_pointer_t<T>>::type>>>();
+    } else if constexpr (kWriteBytes) {
+      return std::type_identity<types::st::Bytes<DB, sizeof(T)>>();
     } else {
       return std::type_identity<types::st::Unit<DB>>();
     }
@@ -690,6 +715,12 @@ struct TypeHandler {
                   typename TypeHandler<Ctx, std::remove_pointer_t<T>>::type>::
                   describe,
               &process_pointer_content},
+      };
+    } else if constexpr (kWriteBytes) {
+      return std::array<inst::ProcessorInst, 1>{
+          exporters::inst::ProcessorInst{
+              types::st::Bytes<DB, sizeof(T)>::describe,
+              &process_captured_bytes},
       };
     } else {
       return std::array<inst::ProcessorInst, 0>{};
@@ -720,6 +751,8 @@ struct TypeHandler {
       } else {
         return r0.template delegate<0>(std::identity());
       }
+    } else if constexpr (kWriteBytes) {
+      return returnArg.write(std::bit_cast<std::array<uint8_t, sizeof(T)>>(t));
     } else {
       return returnArg;
     }

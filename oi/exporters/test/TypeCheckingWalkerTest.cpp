@@ -183,3 +183,26 @@ TEST(TypeCheckingWalker, TestListSome) {
 
   ASSERT_FALSE(fifth.has_value());
 }
+
+TEST(TypeCheckingWalker, TestBytes) {
+  // ASSIGN
+  // 0xff deliberately included: a naive signed/numeric interpretation would
+  // corrupt it, whereas plain bytes should not.
+  std::vector<uint64_t> data{0x12, 0xff, 0x00, 0x7f};
+
+  types::dy::Bytes rootType{data.size()};
+
+  TypeCheckingWalker walker(rootType, data);
+
+  // ACT
+  auto first = walker.advance();
+  auto second = walker.advance();
+
+  // ASSERT
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(std::holds_alternative<TypeCheckingWalker::Bytes>(*first));
+  EXPECT_EQ(std::get<TypeCheckingWalker::Bytes>(*first).value,
+            (std::vector<uint8_t>{0x12, 0xff, 0x00, 0x7f}));
+
+  ASSERT_FALSE(second.has_value());
+}

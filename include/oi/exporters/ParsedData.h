@@ -45,6 +45,9 @@ struct ParsedData {
   struct VarInt {
     uint64_t value;
   };
+  struct Bytes {
+    std::vector<uint8_t> value;
+  };
   struct Pair {
     Lazy first;
     Lazy second;
@@ -65,6 +68,8 @@ struct ParsedData {
   }
   ParsedData(VarInt&& val_) : val(val_) {
   }
+  ParsedData(Bytes&& val_) : val(std::move(val_)) {
+  }
   ParsedData(Pair&& val_) : val(val_) {
   }
   ParsedData(List&& val_) : val(val_) {
@@ -72,7 +77,7 @@ struct ParsedData {
   ParsedData(Sum&& val_) : val(val_) {
   }
 
-  std::variant<Unit, VarInt, Pair, List, Sum> val;
+  std::variant<Unit, VarInt, Bytes, Pair, List, Sum> val;
 };
 
 }  // namespace oi::exporters
