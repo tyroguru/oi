@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -54,6 +55,32 @@ std::optional<IntrospectionResult> tryIntrospect(const T& objectAddr) {
   // This checks twice but is necessary for compile time as it currently
   // depends on the presence of the strong symbol.
   return introspect(objectAddr);
+}
+
+/*
+ * Research groundwork for byte-accurate object capture (see
+ * docs/object-capture-initial-thoughts.md, not part of this repo) -
+ * reconstruct<T> is the read-side counterpart to introspect<T>: given the
+ * raw bytes a capture-enabled introspect<T>() produced, build a live T.
+ * Symmetric to introspectImpl above in every way that matters: a weak
+ * template with no definition here, given a strong definition by oilgen
+ * (when it also finds a reconstruct<T>() call site) under the identical
+ * mangled name, resolved by ordinary linker symbol resolution. Deliberately
+ * takes raw bytes rather than an IntrospectionResult - nothing here should
+ * assume the bytes came from a still-in-scope capture in this same
+ * process, since that assumption would need undoing the moment capture and
+ * reconstruction stop happening in the same process.
+ */
+template <class T>
+T __attribute__((weak)) reconstructImpl(std::span<const uint8_t> bytes);
+
+template <typename T>
+T reconstruct(std::span<const uint8_t> bytes) {
+  if (!reconstructImpl<T>)
+    throw std::logic_error(
+        "OIL is expecting AoT compilation but it doesn't appear to have run.");
+
+  return reconstructImpl<T>(bytes);
 }
 
 #endif

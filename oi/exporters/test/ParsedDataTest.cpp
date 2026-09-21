@@ -64,9 +64,7 @@ T roundTripBytes(const T& value) {
   const auto& bytes = std::get<ParsedData::Bytes>(parsed.val).value;
   EXPECT_EQ(bytes.size(), sizeof(T));
 
-  std::array<uint8_t, sizeof(T)> arr;
-  std::copy(bytes.begin(), bytes.end(), arr.begin());
-  return std::bit_cast<T>(arr);
+  return oi::exporters::reconstructScalar<T>(std::get<ParsedData::Bytes>(parsed.val));
 }
 
 }  // namespace
@@ -113,6 +111,48 @@ TEST(ParsedDataBytes, RoundTripsMultiByteStruct) {
   Blob value{.a = 0xAB, .b = 0xCDEF, .c = 0x12};
 
   Blob result = roundTripBytes(value);
+  EXPECT_EQ(result.a, value.a);
+  EXPECT_EQ(result.b, value.b);
+  EXPECT_EQ(result.c, value.c);
+}
+
+// Direct tests of reconstructScalar itself, rather than through the
+// roundTripBytes helper above (which now calls it internally) - this is
+// the actual reconstruction primitive object-capture work will build on,
+// so its contract deserves its own explicit, discoverable coverage.
+TEST(ParsedDataReconstruct, ReconstructsPositiveInt) {
+  int32_t value = 123456;
+  auto bytes = std::bit_cast<std::array<uint8_t, sizeof(int32_t)>>(value);
+  ParsedData::Bytes parsed{.value = {bytes.begin(), bytes.end()}};
+  EXPECT_EQ(oi::exporters::reconstructScalar<int32_t>(parsed), value);
+}
+
+TEST(ParsedDataReconstruct, ReconstructsNegativeInt) {
+  int32_t value = -1;
+  auto bytes = std::bit_cast<std::array<uint8_t, sizeof(int32_t)>>(value);
+  ParsedData::Bytes parsed{.value = {bytes.begin(), bytes.end()}};
+  EXPECT_EQ(oi::exporters::reconstructScalar<int32_t>(parsed), value);
+}
+
+TEST(ParsedDataReconstruct, ReconstructsFloatNaNBitPattern) {
+  float value = std::numeric_limits<float>::quiet_NaN();
+  auto bytes = std::bit_cast<std::array<uint8_t, sizeof(float)>>(value);
+  ParsedData::Bytes parsed{.value = {bytes.begin(), bytes.end()}};
+  float result = oi::exporters::reconstructScalar<float>(parsed);
+  EXPECT_EQ(std::bit_cast<uint32_t>(result), std::bit_cast<uint32_t>(value));
+}
+
+TEST(ParsedDataReconstruct, ReconstructsMultiByteStruct) {
+  struct Blob {
+    uint8_t a;
+    uint16_t b;
+    uint8_t c;
+  };
+  Blob value{.a = 0xAB, .b = 0xCDEF, .c = 0x12};
+  auto bytes = std::bit_cast<std::array<uint8_t, sizeof(Blob)>>(value);
+  ParsedData::Bytes parsed{.value = {bytes.begin(), bytes.end()}};
+
+  Blob result = oi::exporters::reconstructScalar<Blob>(parsed);
   EXPECT_EQ(result.a, value.a);
   EXPECT_EQ(result.b, value.b);
   EXPECT_EQ(result.c, value.c);

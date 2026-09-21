@@ -83,6 +83,19 @@ class CodeGen {
                 std::string& code,
                 RootFunctionName rootName);
 
+  /*
+   * Research groundwork for byte-accurate object capture (see
+   * docs/object-capture-initial-thoughts.md, not part of this repo) -
+   * generates the read-side counterpart to generate() above: given a root
+   * type's captured bytes, produce a live instance of it. Currently only
+   * supports a scalar (Primitive) root type, to prove the reconstructImpl<T>
+   * weak-symbol scaffold end-to-end before generalizing to classes and
+   * containers.
+   */
+  void generateReconstruct(type_graph::TypeGraph& typeGraph,
+                           std::string& code,
+                           RootFunctionName rootName);
+
  private:
   type_graph::TypeGraph typeGraph_;
   const OICodeGenConfig& config_;

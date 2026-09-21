@@ -18,6 +18,8 @@
 
 #include <oi/types/dy.h>
 
+#include <array>
+#include <bit>
 #include <cassert>
 #include <cstdint>
 #include <variant>
@@ -84,6 +86,24 @@ struct ParsedData {
 
   std::variant<Unit, VarInt, Bytes, DynBytes, Pair, List, Sum> val;
 };
+
+/*
+ * Reconstructs the exact scalar value a leaf's captured Bytes payload
+ * represents - the inverse of the capture side's
+ * std::bit_cast<std::array<uint8_t, sizeof(T)>>(t) (see
+ * FuncGen::DefineBasicTypeHandlers). T must be the same trivially-copyable
+ * type that was captured; like every other part of this system, there is
+ * no way to identify T from the stream itself - the caller is expected to
+ * already know it (see docs/object-capture-initial-thoughts.md's "do we
+ * have enough information to identify container types" discussion).
+ */
+template <typename T>
+T reconstructScalar(const ParsedData::Bytes& bytes) {
+  assert(bytes.value.size() == sizeof(T));
+  std::array<uint8_t, sizeof(T)> arr;
+  std::copy(bytes.value.begin(), bytes.value.end(), arr.begin());
+  return std::bit_cast<T>(arr);
+}
 
 }  // namespace oi::exporters
 
