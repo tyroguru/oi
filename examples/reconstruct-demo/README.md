@@ -14,8 +14,11 @@ The server process never shares memory with the client - it only ever sees a
 flat byte stream on disk - so a matching printout on both sides demonstrates
 the round trip actually works. `DemoObject` (defined in `ReconstructDemo.cpp`)
 covers every member kind reconstruction currently supports: a nested-enum
-member, a scalar, a `std::string`, a `std::vector<int32_t>`, and a
-`std::map<std::string, int32_t>`.
+member, a scalar, a `std::string`, a `std::vector<int32_t>`, a
+`std::map<std::string, int32_t>`, and a trivially-copyable C-style union
+(`IPv4Address` - the classic "same 4 bytes as either one `uint32_t` or 4
+octets" trick, populated with `8.8.8.8` so the reconstructed value is
+immediately recognizable).
 
 Only `--transport local` is implemented today. `--transport remote` is
 accepted on the command line but rejected at runtime - it's a placeholder for
@@ -101,20 +104,22 @@ client: original object:
   label = "Hello from the OI byte-accurate reconstruction demo!"
   scores = [10, 20, 30, 40, 50]
   attributes = {alpha: 1, beta: 2, gamma: 3}
-client: captured 189 bytes, sending via transport=local
+  address = 8.8.8.8 (same bytes as raw=0x8080808)
+client: captured 193 bytes, sending via transport=local
 client: done
 ```
 
 Within 5 seconds, the server's next poll picks up the file and finishes:
 
 ```
-server: received 189 bytes, reconstructing...
+server: received 193 bytes, reconstructing...
 server: reconstructed object:
   status = ACTIVE
   id = 42
   label = "Hello from the OI byte-accurate reconstruction demo!"
   scores = [10, 20, 30, 40, 50]
   attributes = {alpha: 1, beta: 2, gamma: 3}
+  address = 8.8.8.8 (same bytes as raw=0x8080808)
 ```
 
 The two printouts matching, despite the server process never having touched
@@ -151,5 +156,6 @@ transport:
   Nothing here validates cross-architecture or cross-endianness
   reconstruction.
 - **Not every member type is reconstructable yet.** `DemoObject` deliberately
-  sticks to what's supported today (enum, scalar, string, vector, map).
-  Nested class/struct members and pointer members aren't yet.
+  sticks to what's supported today (enum, scalar, string, vector, map,
+  trivially-copyable union). Nested class/struct members and pointer members
+  aren't yet.
