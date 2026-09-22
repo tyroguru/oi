@@ -37,6 +37,7 @@ namespace oi::detail::type_graph {
 class Class;
 class Member;
 class PassManager;
+class Primitive;
 }  // namespace oi::detail::type_graph
 
 namespace oi::detail {
@@ -87,16 +88,24 @@ class CodeGen {
    * Research groundwork for byte-accurate object capture (see
    * docs/object-capture-initial-thoughts.md, not part of this repo) -
    * generates the read-side counterpart to generate() above: given a root
-   * type's captured bytes, produce a live instance of it. Currently only
-   * supports a scalar (Primitive) root type, to prove the reconstructImpl<T>
-   * weak-symbol scaffold end-to-end before generalizing to classes and
-   * containers.
+   * type's captured bytes, produce a live instance of it. Supports a
+   * scalar (Primitive) root type, and a flat struct/class of scalar
+   * members (raw byte replay, no pointer fixup or nested class/container
+   * members yet) - see generateReconstructScalar/generateReconstructClass.
    */
   void generateReconstruct(type_graph::TypeGraph& typeGraph,
                            std::string& code,
                            RootFunctionName rootName);
 
  private:
+  void generateReconstructScalar(type_graph::Primitive& primitive,
+                                 const std::string& typeToHash,
+                                 std::string& code);
+  void generateReconstructClass(type_graph::TypeGraph& typeGraph,
+                                type_graph::Class& cls,
+                                const std::string& typeToHash,
+                                std::string& code);
+
   type_graph::TypeGraph typeGraph_;
   const OICodeGenConfig& config_;
   SymbolService* symbols_ = nullptr;
