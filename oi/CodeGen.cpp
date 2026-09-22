@@ -1387,17 +1387,16 @@ void CodeGen::generateReconstructScalar(Primitive& primitive,
   code += "}\n";
 }
 
-// The class/struct slice of the reconstruction scaffold: raw byte replay
-// for a flat struct of scalar members, no pointer fixup or nested
-// class/container members yet (see
-// docs/object-capture-initial-thoughts.md). Mirrors genClassStaticType's
-// wire shape - a right-nested chain of types::st::Pair<leaf, ...> - but
-// built from the runtime types::dy:: descriptors instead, since this code
-// has to decode a shape it didn't just statically encode.
-void CodeGen::generateReconstructClass(TypeGraph& typeGraph,
-                                       Class& cls,
-                                       const std::string& typeToHash,
-                                       std::string& code) {
+namespace {
+
+// Shared by generateReconstructClassBody (standalone reconstruct-only
+// codegen) and appendReconstructFunctionBody's class path (combined
+// introspect+reconstruct codegen, see CodeGen.h) - both need the same
+// "which members can we rebuild, and under what name" answer, independent
+// of whether the struct's own OIInternal redeclaration is being emitted
+// alongside them or was already emitted by generate() for the same root.
+std::vector<ReconstructableMember> collectReconstructableMembers(
+    const Class& cls) {
   size_t lastNonPaddingElement = getLastNonPaddingMemberIndex(cls.members);
   if (lastNonPaddingElement == (size_t)-1) {
     throw std::runtime_error(
@@ -1426,25 +1425,52 @@ void CodeGen::generateReconstructClass(TypeGraph& typeGraph,
     // "uint32_t"), not member.type().name() - the member's *declared*
     // type is frequently a Typedef (std::uint32_t -> uint32_t -> ...),
     // and those typedef names only exist inside OIInternal's anonymous
-    // namespace below (same as genDefs() emits for generate()'s own use),
+    // namespace (same as genDefs() emits for generate()'s own use),
     // unreachable from the free functions this generates. A Primitive's
     // name is always a globally-resolvable spelling already covered by
     // this file's #include <cstdint> (see Types.cpp's Primitive::getName),
     // so it sidesteps the qualification question entirely.
     members.push_back({.name = member.name, .typeName = primitiveType->name()});
   }
-  size_t n = members.size();
+  return members;
+}
 
-  // Re-declare the struct exactly as the write side does (see generate()) -
-  // internal-linkage, but layout-identical to the real type, which is all
-  // the extern "C" function below needs: the C++ ABI for returning it by
-  // value depends on size/alignment/triviality, not nominal type identity.
+}  // namespace
+
+// Emits the struct's own redeclaration (internal-linkage, layout-identical
+// to the real type - see generate()'s identical trick for introspectImpl)
+// and the OIInternal::__ROOT_TYPE__ alias the body below depends on. Split
+// out from generateReconstructClassBody so appendReconstructFunctionBody
+// can skip this entirely when generate() already emitted an equivalent
+// redeclaration for the same root (the combined introspect+reconstruct
+// case - see CodeGen.h).
+void CodeGen::generateReconstructClassPreamble(TypeGraph& typeGraph,
+                                               Class& cls,
+                                               std::string& code) {
   code += "namespace OIInternal {\nnamespace {\n";
   defineInternalTypes(code);  // OIArray<>, used by padding members below
   genDecls(typeGraph, code);
   genDefs(typeGraph, code);
   code += "using __ROOT_TYPE__ = " + cls.name() + ";\n";
   code += "} // namespace\n} // namespace OIInternal\n";
+}
+
+// The class/struct slice of the reconstruction scaffold: raw byte replay
+// for a flat struct of scalar members, no pointer fixup or nested
+// class/container members yet (see
+// docs/object-capture-initial-thoughts.md). Mirrors genClassStaticType's
+// wire shape - a right-nested chain of types::st::Pair<leaf, ...> - but
+// built from the runtime types::dy:: descriptors instead, since this code
+// has to decode a shape it didn't just statically encode. Assumes
+// OIInternal::__ROOT_TYPE__ already exists in `code` - either from this
+// same call's own generateReconstructClassPreamble (standalone reconstruct)
+// or from generate()'s equivalent redeclaration for the same root (the
+// combined case).
+void CodeGen::generateReconstructClassBody(Class& cls,
+                                           const std::string& typeToHash,
+                                           std::string& code) {
+  std::vector<ReconstructableMember> members = collectReconstructableMembers(cls);
+  size_t n = members.size();
 
   for (size_t i = 0; i < n; i++) {
     code += "static constexpr oi::types::dy::Bytes leaf_" + std::to_string(i) +
@@ -1557,11 +1583,61 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
   if (primitive) {
     generateReconstructScalar(*primitive, typeToHash, code);
   } else {
-    generateReconstructClass(typeGraph, *cls, typeToHash, code);
+    generateReconstructClassPreamble(typeGraph, *cls, code);
+    generateReconstructClassBody(*cls, typeToHash, code);
   }
 
   if (VLOG_IS_ON(3)) {
     VLOG(3) << "Generated reconstruct code:\n";
+    std::cerr << code;
+  }
+}
+
+// The combined introspect+reconstruct case (same root T, one oilgen
+// invocation - see docs/object-capture-initial-thoughts.md and
+// OIGenerator::generate()'s same-type check): appends reconstructImpl<T>'s
+// function body to `code` that generate() already populated for
+// introspectImpl<T>, reusing generate()'s OIInternal::__ROOT_TYPE__
+// redeclaration instead of emitting a second, colliding copy of it. Unlike
+// generateReconstruct(), this never clears `code` and never emits the
+// includes/glibc-compat preamble - generate() already did both, and this
+// is only ever called immediately after it for the same TypeGraph.
+void CodeGen::appendReconstructFunctionBody(TypeGraph& typeGraph,
+                                            std::string& code,
+                                            RootFunctionName rootName) {
+  assert(typeGraph.rootTypes().size() == 1);
+  Type& rootType = typeGraph.rootTypes()[0];
+
+  auto* primitive = dynamic_cast<Primitive*>(&rootType);
+  auto* cls = dynamic_cast<Class*>(&rootType);
+  if (!primitive && !cls) {
+    throw std::runtime_error(
+        "CodeGen::appendReconstructFunctionBody: only scalar and "
+        "flat-struct root types are currently supported (see "
+        "docs/object-capture-initial-thoughts.md - containers and pointer "
+        "fixup are not yet implemented)");
+  }
+
+  const auto& typeToHash = std::visit(
+      [](const auto& v) -> const std::string& {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<ExactName, T> ||
+                      std::is_same_v<HashedComponent, T>) {
+          return v.name;
+        } else {
+          static_assert(always_false_v<T>, "missing visit");
+        }
+      },
+      rootName);
+
+  if (primitive) {
+    generateReconstructScalar(*primitive, typeToHash, code);
+  } else {
+    generateReconstructClassBody(*cls, typeToHash, code);
+  }
+
+  if (VLOG_IS_ON(3)) {
+    VLOG(3) << "Generated (appended) reconstruct code:\n";
     std::cerr << code;
   }
 }

@@ -182,12 +182,15 @@ int OIGenerator::generate(clang::tooling::CompilationDatabase& db,
     return ret;
   }
 
-  if (ctx.nameToTypeMap.size() + ctx.nameToReconstructTypeMap.size() > 1)
+  if (ctx.nameToTypeMap.size() > 1 || ctx.nameToReconstructTypeMap.size() > 1)
     throw std::logic_error(
-        "found more than one site to generate for but we can't currently "
-        "handle this case");
+        "found more than one introspect (or reconstruct) site to generate "
+        "for but we can't currently handle this case");
 
-  if (ctx.nameToTypeMap.empty() && ctx.nameToReconstructTypeMap.empty()) {
+  const bool haveIntrospect = !ctx.nameToTypeMap.empty();
+  const bool haveReconstruct = !ctx.nameToReconstructTypeMap.empty();
+
+  if (!haveIntrospect && !haveReconstruct) {
     LOG(ERROR) << "Nothing to generate!";
     return failIfNothingGenerated ? -1 : 0;
   }
@@ -198,14 +201,51 @@ int OIGenerator::generate(clang::tooling::CompilationDatabase& db,
     codegen.registerContainer(std::move(ptr));
   codegen.transform(ctx.typeGraph);
 
+  // Both an introspect<T>() and a reconstruct<U>() site were found - this
+  // is only supported when T and U are identical. They weren't directly
+  // comparable at addRoot() time (see HandleTranslationUnit): introspect's
+  // root was still wrapped in a Reference type-graph node there, since
+  // nothing had stripped it yet, while reconstruct's root never had one.
+  // transform()'s RemoveTopLevelPointer pass (run just above, as part of
+  // the normal pipeline) is what normalizes that away, which is why this
+  // check has to live here and not earlier. HandleTranslationUnit adding
+  // introspect's root before reconstruct's is what guarantees they land at
+  // indices 0 and 1 respectively.
+  if (haveIntrospect && haveReconstruct) {
+    assert(ctx.typeGraph.rootTypes().size() == 2);
+    type_graph::Type& introspectRoot = ctx.typeGraph.rootTypes()[0];
+    type_graph::Type& reconstructRoot = ctx.typeGraph.rootTypes()[1];
+    if (&introspectRoot != &reconstructRoot) {
+      throw std::logic_error(
+          "oi::introspect<T>() and oi::reconstruct<U>() for different types "
+          "in the same translation unit are not yet supported - T and U "
+          "must currently be identical");
+    }
+    // Same underlying root, just added twice (once per map) - drop the
+    // redundant second entry so CodeGen's "exactly one root" assumption
+    // (generate()/generateReconstruct()/appendReconstructFunctionBody())
+    // still holds.
+    ctx.typeGraph.rootTypes().pop_back();
+  }
+
   std::string code;
-  if (!ctx.nameToTypeMap.empty()) {
+  if (haveIntrospect) {
     const auto& linkageName = ctx.nameToTypeMap.begin()->first;
     codegen.generate(ctx.typeGraph, code, CodeGen::ExactName{linkageName});
-  } else {
+  }
+  if (haveReconstruct) {
     const auto& linkageName = ctx.nameToReconstructTypeMap.begin()->first;
-    codegen.generateReconstruct(ctx.typeGraph, code,
-                                CodeGen::ExactName{linkageName});
+    if (haveIntrospect) {
+      // Same root as the generate() call just above (enforced by the
+      // type-identity check above) - append reconstructImpl<T>'s function
+      // body to the code generate() already produced, instead of emitting
+      // a second, colliding copy of T's OIInternal redeclaration.
+      codegen.appendReconstructFunctionBody(ctx.typeGraph, code,
+                                            CodeGen::ExactName{linkageName});
+    } else {
+      codegen.generateReconstruct(ctx.typeGraph, code,
+                                  CodeGen::ExactName{linkageName});
+    }
   }
 
   std::string sourcePath = sourceFileDumpPath;
@@ -343,6 +383,18 @@ class CreateTypeGraphConsumer : public clang::ASTConsumer {
       ctx.nameToReconstructTypeMap.insert(els.begin(), els.end());
     }
 
+    // Not deduplicated here, deliberately: introspectImpl<T>(const T&)'s
+    // parameter type and reconstructImpl<T>'s template argument are NOT
+    // the same clang::Type* even for identical T - the parameter type is
+    // still wrapped in a Reference type-graph node at this point (nothing
+    // has stripped it yet), while the template argument never had one.
+    // They only become comparable once transform()'s RemoveTopLevelPointer
+    // pass has normalized both - see OIGenerator::generate(), which does
+    // that comparison (and the corresponding rootTypes() cleanup) after
+    // calling transform(). Order matters: introspect's root (if any) must
+    // land at index 0 and reconstruct's at index 1, since that's what lets
+    // generate() find them again post-transform without keeping its own
+    // separate Type* handles.
     for (const auto& [name, type] : ctx.nameToTypeMap)
       ctx.typeGraph.addRoot(*type);
     for (const auto& [name, type] : ctx.nameToReconstructTypeMap)
