@@ -1352,16 +1352,21 @@ void CodeGen::generate(TypeGraph& typeGraph,
 
 namespace {
 
-// Unwraps Typedefs to find the underlying Primitive a member's type
-// resolves to, or nullptr if it never bottoms out at one - the current
-// reconstruction scaffold only knows how to rebuild plain scalar members
-// (see CodeGen::generateReconstructClass).
-const Primitive* resolvePrimitiveMember(const Member& m) {
-  const Type* t = &m.type();
-  while (const auto* td = dynamic_cast<const Typedef*>(t)) {
-    t = &td->underlyingType();
+// Unwraps Typedefs to find the underlying Primitive a type resolves to, or
+// nullptr if it never bottoms out at one - the current reconstruction
+// scaffold only knows how to rebuild plain scalars, whether they're a
+// class's member (see CodeGen::generateReconstructClassBody) or a
+// container's element (see CodeGen::generateReconstructContainerBody).
+const Primitive* resolvePrimitive(const Type& t) {
+  const Type* cur = &t;
+  while (const auto* td = dynamic_cast<const Typedef*>(cur)) {
+    cur = &td->underlyingType();
   }
-  return dynamic_cast<const Primitive*>(t);
+  return dynamic_cast<const Primitive*>(cur);
+}
+
+const Primitive* resolvePrimitiveMember(const Member& m) {
+  return resolvePrimitive(m.type());
 }
 
 struct ReconstructableMember {
@@ -1537,6 +1542,132 @@ void CodeGen::generateReconstructClassBody(Class& cls,
   code += "}\n";
 }
 
+// The container slice of the reconstruction scaffold: a single-element-kind
+// container (sequence or set - not yet map, which needs a second, key+value
+// calling convention - see ContainerInfo.h's `reconstruct` field doc) whose
+// element type is a scalar. Assumes TypeHandler<Ctx, T0> (from
+// FuncGen::DefineBasicTypeHandlers) and DEFINE_DESCRIBE-enabled
+// oi/types/st.h are already available - either generate() already emitted
+// them (the combined case) or the caller emits them itself first (the
+// standalone case, see generateReconstruct()).
+//
+// Unlike a Class root, a container never needs an OIInternal redeclaration:
+// std::vector<int32_t> is already a complete, nameable type given its own
+// header, with no user-defined-type-visibility problem to work around.
+void CodeGen::generateReconstructContainerBody(Container& container,
+                                               const std::string& typeToHash,
+                                               std::string& code) {
+  const ContainerInfo& info = container.containerInfo_;
+  if (info.codegen.reconstruct.empty()) {
+    throw std::runtime_error(
+        "CodeGen::generateReconstructContainerBody: " + info.typeName +
+        " has no `codegen.reconstruct` defined - not yet reconstructable");
+  }
+  if (container.templateParams.empty()) {
+    throw std::runtime_error(
+        "CodeGen::generateReconstructContainerBody: " + info.typeName +
+        " has no template parameters to reconstruct an element type from");
+  }
+  const Primitive* elementType =
+      resolvePrimitive(container.templateParams[0].type());
+  if (!elementType) {
+    throw std::runtime_error(
+        "CodeGen::generateReconstructContainerBody: " + info.typeName +
+        "'s element type is not a scalar - only scalar-element containers "
+        "are currently supported (see "
+        "docs/object-capture-initial-thoughts.md)");
+  }
+  const std::string& t0Name = elementType->name();
+
+  const auto& processors = info.codegen.processors;
+  size_t n = processors.size();
+  if (n == 0) {
+    throw std::runtime_error(
+        "CodeGen::generateReconstructContainerBody: " + info.typeName +
+        " has no codegen.processor entries to decode captured bytes from");
+  }
+
+  // The container's full wire shape, exactly as genContainerTypeHandler
+  // builds it for the write side (see CodeGen.cpp above) - a right-nested
+  // Pair of every processor's type, in order. Reused verbatim (not
+  // re-derived) specifically so this can never drift out of sync with what
+  // the write side actually produced.
+  std::string shapeType;
+  for (size_t i = 0; i < n; i++) {
+    if (i != n - 1)
+      shapeType += "types::st::Pair<DB, ";
+    shapeType += processors[i].type;
+    if (i != n - 1)
+      shapeType += ", ";
+  }
+  shapeType += std::string(n - 1, '>');
+
+  const std::string containerType = info.typeName + "<" + t0Name + ">";
+
+  code += "extern \"C\" " + containerType + " " + typeToHash +
+          "(std::span<const uint8_t> bytes) {\n";
+  code += "  using DB = int;\n";
+  code += "  struct OIReconstructFakeCtx { using DataBuffer = DB; };\n";
+  code += "  using Ctx = OIReconstructFakeCtx;\n";
+  code += "  using T0 = " + t0Name + ";\n";
+  // TypeHandler is always emitted inside namespace OIInternal { namespace
+  // {...} } - both by generate() (the combined case) and by
+  // generateReconstruct() itself (the standalone case, which wraps its own
+  // FuncGen::DefineBasicTypeHandlers call the same way specifically so this
+  // line resolves identically either way. The processor type strings below
+  // reference the unqualified name.
+  code += "  using OIInternal::TypeHandler;\n";
+  code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
+  code += "  auto it = vec.cbegin();\n";
+  code += "  auto parsed = oi::exporters::ParsedData::parse(it, " +
+          shapeType + "::describe);\n";
+
+  // Every processor except the last is profiler bookkeeping (va-intervals,
+  // pointer, capacity, ...) this reconstruction has no use for - but their
+  // bytes still have to be walked in order, exactly like a Class's members
+  // (see generateReconstructClassBody): ParsedData::Pair's fields are Lazy
+  // thunks sharing one live iterator. Unlike the Class case, this code
+  // doesn't want first()'s *value* at each level, only its side effect of
+  // advancing the iterator - and since a discarded processor can itself be
+  // an arbitrarily nested Pair/List/Sum (e.g. the va-interval processor is
+  // a List of Pairs), a single first()/second() call one level deep is not
+  // enough to fully consume it; drainParsedData() recursively invokes every
+  // Lazy underneath it, however deeply nested (see its doc comment).
+  if (n == 1) {
+    code += "  auto& lastVal = parsed;\n";
+  } else {
+    code +=
+        "  auto pair_0 = std::get<oi::exporters::ParsedData::Pair>(parsed."
+        "val);\n";
+    code += "  oi::exporters::drainParsedData(pair_0.first());\n";
+    for (size_t i = 0; i < n - 1; i++) {
+      if (i == n - 2) {
+        code += "  auto lastVal = pair_" + std::to_string(i) + ".second();\n";
+      } else {
+        code += "  auto next_" + std::to_string(i) + " = pair_" +
+                std::to_string(i) + ".second();\n";
+        code += "  auto pair_" + std::to_string(i + 1) +
+                " = std::get<oi::exporters::ParsedData::Pair>(next_" +
+                std::to_string(i) + ".val);\n";
+        code += "  oi::exporters::drainParsedData(pair_" +
+                std::to_string(i + 1) + ".first());\n";
+      }
+    }
+  }
+
+  code +=
+      "  auto list = std::get<oi::exporters::ParsedData::List>(lastVal."
+      "val);\n";
+  code += "  size_t length = list.length;\n";
+  code +=
+      "  auto nextElement = [&list]() { return "
+      "oi::exporters::reconstructScalar<T0>(std::get<oi::exporters::"
+      "ParsedData::Bytes>(list.values().val)); };\n";
+
+  code += (boost::format(info.codegen.reconstruct) % info.typeName).str();
+  code += "}\n";
+}
+
 void CodeGen::generateReconstruct(TypeGraph& typeGraph,
                                   std::string& code,
                                   RootFunctionName rootName) {
@@ -1547,12 +1678,13 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
 
   auto* primitive = dynamic_cast<Primitive*>(&rootType);
   auto* cls = dynamic_cast<Class*>(&rootType);
-  if (!primitive && !cls) {
+  auto* container = dynamic_cast<Container*>(&rootType);
+  if (!primitive && !cls && !container) {
     throw std::runtime_error(
-        "CodeGen::generateReconstruct: only scalar and flat-struct root "
-        "types are currently supported (see "
-        "docs/object-capture-initial-thoughts.md - containers and pointer "
-        "fixup are not yet implemented)");
+        "CodeGen::generateReconstruct: only scalar, flat-struct, and "
+        "scalar-element-container root types are currently supported (see "
+        "docs/object-capture-initial-thoughts.md - pointer fixup is not "
+        "yet implemented)");
   }
 
   // Same preamble generate() emits (see OITraceCode.cpp): among other
@@ -1568,6 +1700,50 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
   code += "#include <span>\n";
   code += "#include <vector>\n\n";
 
+  if (container) {
+    // Only the container path needs the TypeHandler<Ctx, T0>/st:: describe
+    // machinery - generate()'s equivalent (combined) path already has both
+    // via addIncludes()/DefineBasicTypeHandlers(), so this is confined to
+    // the standalone case. TypeHandler is wrapped in the same
+    // namespace OIInternal { namespace { ... } } generate() itself uses,
+    // so generateReconstructContainerBody's `using OIInternal::TypeHandler;`
+    // resolves identically regardless of which path produced it.
+    code += "#define DEFINE_DESCRIBE 1\n";
+    code += "#include <oi/types/st.h>\n";
+    code += "#include <oi/exporters/inst.h>\n";  // also brings in result/Element.h
+    code += "#include <" + container->containerInfo_.header + ">\n\n";
+    // DefineBasicTypeHandlers' own emitted code uses inst::/result::/
+    // ParsedData/types::st:: unqualified, and (in its pointer branch, which
+    // T0 never instantiates but still has to parse) the JLOG/JLOGPTR
+    // macros - all normally brought into scope by generate()'s preamble,
+    // which this standalone path doesn't otherwise run. Deliberately no
+    // `using namespace oi::detail;` here (unlike generate()'s equivalent
+    // preamble): that only compiles there because generate() has already
+    // declared real content under oi::detail::DataBuffer earlier in the
+    // same file, which is what makes oi::detail a name the compiler
+    // recognizes at all - nothing in this path ever opens that namespace,
+    // and nothing generateReconstructContainerBody emits needs it.
+    code += "using namespace oi;\n";
+    code += "using oi::exporters::ParsedData;\n";
+    code += "using namespace oi::exporters;\n";
+    FuncGen::DefineJitLog(code, config_.features);
+    code += "namespace OIInternal {\nnamespace {\n";
+    // DefineBasicTypeHandlers' make_field<Ctx,T>() (never instantiated by
+    // this path, but still parsed as part of the template definition)
+    // references these dependent names, which two-phase lookup needs
+    // declared as templates regardless. ExclusiveSizeProvider needs its
+    // real generic definition (make_field's own use is unconditional, not
+    // gated behind an `if constexpr`); NameProvider only needs the forward
+    // declaration genNames() itself starts from - a per-type specialization
+    // is never required since make_field is never actually called here.
+    code += "template <typename T> struct NameProvider;\n";
+    code +=
+        "template <typename T> struct ExclusiveSizeProvider { static "
+        "constexpr size_t size = sizeof(T); };\n";
+    FuncGen::DefineBasicTypeHandlers(code, config_.features);
+    code += "} // namespace\n} // namespace OIInternal\n";
+  }
+
   const auto& typeToHash = std::visit(
       [](const auto& v) -> const std::string& {
         using T = std::decay_t<decltype(v)>;
@@ -1582,9 +1758,11 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
 
   if (primitive) {
     generateReconstructScalar(*primitive, typeToHash, code);
-  } else {
+  } else if (cls) {
     generateReconstructClassPreamble(typeGraph, *cls, code);
     generateReconstructClassBody(*cls, typeToHash, code);
+  } else {
+    generateReconstructContainerBody(*container, typeToHash, code);
   }
 
   if (VLOG_IS_ON(3)) {
@@ -1610,12 +1788,13 @@ void CodeGen::appendReconstructFunctionBody(TypeGraph& typeGraph,
 
   auto* primitive = dynamic_cast<Primitive*>(&rootType);
   auto* cls = dynamic_cast<Class*>(&rootType);
-  if (!primitive && !cls) {
+  auto* container = dynamic_cast<Container*>(&rootType);
+  if (!primitive && !cls && !container) {
     throw std::runtime_error(
-        "CodeGen::appendReconstructFunctionBody: only scalar and "
-        "flat-struct root types are currently supported (see "
-        "docs/object-capture-initial-thoughts.md - containers and pointer "
-        "fixup are not yet implemented)");
+        "CodeGen::appendReconstructFunctionBody: only scalar, flat-struct, "
+        "and scalar-element-container root types are currently supported "
+        "(see docs/object-capture-initial-thoughts.md - pointer fixup is "
+        "not yet implemented)");
   }
 
   const auto& typeToHash = std::visit(
@@ -1632,8 +1811,10 @@ void CodeGen::appendReconstructFunctionBody(TypeGraph& typeGraph,
 
   if (primitive) {
     generateReconstructScalar(*primitive, typeToHash, code);
-  } else {
+  } else if (cls) {
     generateReconstructClassBody(*cls, typeToHash, code);
+  } else {
+    generateReconstructContainerBody(*container, typeToHash, code);
   }
 
   if (VLOG_IS_ON(3)) {

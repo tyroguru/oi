@@ -91,6 +91,23 @@ class IntrospectionResult {
   const_iterator end() const;
   const_iterator cend() const;
 
+  /*
+   * Research groundwork for byte-accurate object capture (see
+   * docs/object-capture-initial-thoughts.md, not part of this repo) - the
+   * complete raw wire stream captured for the root object, exactly as
+   * oi::reconstruct<T>() expects it. Deliberately distinct from
+   * begin()/end()'s decoded Element tree: that tree is filtered/derived
+   * (profiler bookkeeping like va-intervals or container stats never
+   * becomes an Element::Bytes payload), so concatenating leaves' captured
+   * bytes does not reconstruct this stream in general - it only happened
+   * to work for a flat struct of scalars, whose only processors are all
+   * content-bearing. This is the actual, general way to get bytes for
+   * reconstruction from a live capture.
+   */
+  std::span<const uint8_t> rawBytes() const {
+    return buf_;
+  }
+
  private:
   std::vector<uint8_t> buf_;
   exporters::inst::Inst inst_;

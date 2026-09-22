@@ -221,3 +221,40 @@ TEST(ParsedDataBytes, ControlVarIntStillRoundTrips) {
   ParsedData parsed = ParsedData::parse(it, Writer::describe);
   EXPECT_EQ(std::get<ParsedData::VarInt>(parsed.val).value, 300u);
 }
+
+// drainParsedData() exists specifically because a "skipped" compound field
+// (here a List of Pairs, matching a container's own va-interval processor
+// shape) is Lazy at every level, not just its own immediate children - a
+// naive single first()/second() call one level deep leaves the Pairs'
+// VarInts unconsumed, misaligning the field that follows.
+TEST(ParsedDataDrain, DrainsNestedListOfPairsThenStaysAligned) {
+  std::vector<uint8_t> buf;
+  VectorDataBuffer db{buf};
+  using PairOfVarInts = oi::types::st::
+      Pair<VectorDataBuffer, oi::types::st::VarInt<VectorDataBuffer>,
+           oi::types::st::VarInt<VectorDataBuffer>>;
+  using ListWriter = oi::types::st::List<VectorDataBuffer, PairOfVarInts>;
+  using Shape = oi::types::st::
+      Pair<VectorDataBuffer, ListWriter, oi::types::st::VarInt<VectorDataBuffer>>;
+
+  auto tail = Shape{db}
+                  .delegate([](auto listRet) {
+                    auto elements = listRet.write(2);
+                    elements = elements.delegate([](auto pairRet) {
+                      return pairRet.write(111).write(222);
+                    });
+                    elements = elements.delegate([](auto pairRet) {
+                      return pairRet.write(333).write(444);
+                    });
+                    return elements.finish();
+                  })
+                  .write(999);
+  (void)tail;
+
+  auto it = buf.cbegin();
+  ParsedData parsed = ParsedData::parse(it, Shape::describe);
+  auto pair = std::get<ParsedData::Pair>(parsed.val);
+
+  oi::exporters::drainParsedData(pair.first());
+  EXPECT_EQ(std::get<ParsedData::VarInt>(pair.second().val).value, 999u);
+}
