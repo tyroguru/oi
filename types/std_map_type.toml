@@ -82,6 +82,23 @@ for (const auto &entry: container) {
 return tail.finish();
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# calling convention. A map's content processor is a List of (key, value)
+# Pairs (see the last [[codegen.processor]] below) rather than a bare
+# element list, hence "map" rather than "list" - nextEntry() does the
+# extra work of splitting each Pair apart before this body ever sees it.
+reconstruct_kind = "map"
+reconstruct = """
+%1%<T0, T1> result;
+for (size_t i = 0; i < length; i++) {
+  auto entry = nextEntry();
+  result.emplace(std::move(entry.first), std::move(entry.second));
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
 func = """
