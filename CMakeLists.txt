@@ -660,6 +660,11 @@ target_link_libraries(oid oicore treebuilder)
 ### Object Introspection Tests
 if (WITH_TESTS)
   add_subdirectory(test)
+
+  # Research prototype (see examples/reconstruct-demo/ReconstructDemo.cpp) -
+  # gated the same as test/, since it depends on the in-tree oilgen target
+  # and compile_commands.json the same way test/oilgen's AOT tests do.
+  add_subdirectory(examples/reconstruct-demo)
 endif()
 
 

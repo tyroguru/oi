@@ -1758,6 +1758,21 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
         " has no codegen.processor entries to decode captured bytes from");
   }
 
+  // Everything below - the processor-chain walk, the kind-specific
+  // preamble (length/nextElement/nextEntry/contentBytes), and the
+  // reconstruct body itself - is emitted *inside* this result lambda,
+  // not before it. Those preamble names are bare (not idCounter-suffixed,
+  // since a container's toml `reconstruct` text references them
+  // literally - see ContainerInfo.h's calling-convention doc), so two
+  // sibling container members reconstructed into the same enclosing
+  // function (e.g. a class with both a vector member and a map member)
+  // would otherwise redeclare `length` at the same shared scope and fail
+  // to compile. Scoping them inside this lambda, which already exists
+  // per container instance, fixes that for free.
+  const std::string resultVar = v + "_result";
+  code += "  auto " + resultVar + " = [&]() -> " + resolveTypeName(*cont) +
+          " {\n";
+
   // Walk this container's own processor chain - exactly the same
   // "discard everything but the last, but drain every discarded one
   // fully" logic as the top level (see generateReconstructContainerBody's
@@ -1842,9 +1857,6 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
             "DynBytes>(" + lastVal + ".val).value;\n";
   }
 
-  const std::string resultVar = v + "_result";
-  code += "  auto " + resultVar + " = [&]() -> " + resolveTypeName(*cont) +
-          " {\n";
   // T0 (and T1, for a "map"-kind container) must mean *this* container's
   // own template parameters inside its own reconstruct body - shadowing
   // whatever an enclosing level (if any) already declared. Without this,
