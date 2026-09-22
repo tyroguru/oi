@@ -135,6 +135,8 @@ class CodeGen {
                                    const std::string& parsedDataExpr,
                                    size_t& idCounter,
                                    std::string& code);
+  void emitReconstructTypeHandlerSupport(type_graph::TypeGraph& typeGraph,
+                                         std::string& code);
 
   type_graph::TypeGraph typeGraph_;
   const OICodeGenConfig& config_;

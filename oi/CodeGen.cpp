@@ -1352,21 +1352,16 @@ void CodeGen::generate(TypeGraph& typeGraph,
 
 namespace {
 
-// Unwraps Typedefs to find the underlying Primitive a type resolves to, or
-// nullptr if it never bottoms out at one - the current reconstruction
-// scaffold only knows how to rebuild plain scalars, whether they're a
-// class's member (see CodeGen::generateReconstructClassBody) or a
-// container's element (see CodeGen::generateReconstructContainerBody).
-const Primitive* resolvePrimitive(const Type& t) {
-  const Type* cur = &t;
-  while (const auto* td = dynamic_cast<const Typedef*>(cur)) {
-    cur = &td->underlyingType();
-  }
-  return dynamic_cast<const Primitive*>(cur);
-}
-
-const Primitive* resolvePrimitiveMember(const Member& m) {
-  return resolvePrimitive(m.type());
+// Unwraps Typedefs to find the underlying type a type resolves to -
+// reconstruction only knows how to rebuild scalars and containers (not,
+// say, a Typedef node itself), whether reconstructing a class's member
+// (see CodeGen::collectReconstructableMembers) or a container's element
+// (see CodeGen::emitReconstructValue).
+Type& unwrapTypedefs(Type& t) {
+  Type* resolved = &t;
+  while (auto* td = dynamic_cast<Typedef*>(resolved))
+    resolved = &td->underlyingType();
+  return *resolved;
 }
 
 // Recursively names the concrete C++ type reconstruction should produce
@@ -1378,14 +1373,12 @@ const Primitive* resolvePrimitiveMember(const Member& m) {
 // concrete, constructible type on its own. See generateReconstructContainerBody's
 // t0Name comment for the known char/int8_t caveat this inherits.
 std::string resolveTypeName(Type& t) {
-  Type* resolved = &t;
-  while (auto* td = dynamic_cast<Typedef*>(resolved))
-    resolved = &td->underlyingType();
+  Type& resolved = unwrapTypedefs(t);
 
-  if (auto* prim = dynamic_cast<Primitive*>(resolved))
+  if (auto* prim = dynamic_cast<Primitive*>(&resolved))
     return prim->name();
 
-  if (auto* cont = dynamic_cast<Container*>(resolved)) {
+  if (auto* cont = dynamic_cast<Container*>(&resolved)) {
     if (cont->templateParams.empty())
       throw std::runtime_error("CodeGen::resolveTypeName: " +
                                cont->containerInfo_.typeName +
@@ -1395,14 +1388,14 @@ std::string resolveTypeName(Type& t) {
   }
 
   throw std::runtime_error(
-      "CodeGen::resolveTypeName: " + resolved->name() +
+      "CodeGen::resolveTypeName: " + resolved.name() +
       " is neither a scalar nor a container - cannot name its "
       "reconstructed type");
 }
 
 struct ReconstructableMember {
   std::string_view name;
-  std::string typeName;
+  Type* type;  // already unwrapped past any Typedef - Primitive or Container
 };
 
 }  // namespace
@@ -1446,32 +1439,61 @@ std::vector<ReconstructableMember> collectReconstructableMembers(
     if (member.name.starts_with(AddPadding::MemberPrefix))
       continue;
 
-    const Primitive* primitiveType = resolvePrimitiveMember(member);
-    if (!primitiveType) {
+    Type& resolved = unwrapTypedefs(member.type());
+    if (!dynamic_cast<Primitive*>(&resolved) &&
+        !dynamic_cast<Container*>(&resolved)) {
       throw std::runtime_error(
           "CodeGen::generateReconstructClass: member " + cls.name() + "::" +
           member.name +
-          " is not a scalar - only flat structs of scalar members are "
-          "currently supported (see "
-          "docs/object-capture-initial-thoughts.md - class/container "
-          "members and pointer fixup are not yet implemented)");
+          " is neither a scalar nor a reconstructable container - not yet "
+          "supported (see docs/object-capture-initial-thoughts.md - "
+          "pointer fixup and nested class members are not yet "
+          "implemented)");
     }
 
-    // Deliberately the resolved Primitive's own canonical name (e.g.
-    // "uint32_t"), not member.type().name() - the member's *declared*
-    // type is frequently a Typedef (std::uint32_t -> uint32_t -> ...),
-    // and those typedef names only exist inside OIInternal's anonymous
-    // namespace (same as genDefs() emits for generate()'s own use),
-    // unreachable from the free functions this generates. A Primitive's
-    // name is always a globally-resolvable spelling already covered by
-    // this file's #include <cstdint> (see Types.cpp's Primitive::getName),
-    // so it sidesteps the qualification question entirely.
-    members.push_back({.name = member.name, .typeName = primitiveType->name()});
+    members.push_back({.name = member.name, .type = &resolved});
   }
   return members;
 }
 
 }  // namespace
+
+// Emits, inside namespace OIInternal { namespace {...} }, everything
+// generateReconstructClassBody's/emitReconstructValue's use of
+// TypeHandler<Ctx, T>::type::describe needs to exist: the generic
+// scalar/pointer TypeHandler (FuncGen::DefineBasicTypeHandlers) plus a
+// real specialization for every container reachable from this root
+// (addStandardTypeHandlers/addTypeHandlers, driven off
+// typeGraph.finalTypes - already populated, since transform() runs
+// unconditionally before either codegen path). Shared between the
+// container root case (generateReconstruct(), which calls this directly)
+// and the class root case (generateReconstructClassPreamble, below) -
+// only the *standalone* paths need it at all, since generate() already
+// does the equivalent for the combined introspect+reconstruct case.
+//
+// Must run after the struct itself is declared/defined (when there is
+// one) - addTypeHandlers emits its own TypeHandler<Ctx, ThisClass>
+// specialization too (harmless but requires the class name to already
+// exist), which is why generateReconstructClassPreamble calls this after
+// genDefs, not before.
+void CodeGen::emitReconstructTypeHandlerSupport(TypeGraph& typeGraph,
+                                                std::string& code) {
+  // DefineBasicTypeHandlers' make_field<Ctx,T>() (never instantiated by
+  // this path, but still parsed as part of the template definition)
+  // references these dependent names, which two-phase lookup needs
+  // declared as templates regardless. ExclusiveSizeProvider needs its
+  // real generic definition (make_field's own use is unconditional, not
+  // gated behind an `if constexpr`); NameProvider only needs the forward
+  // declaration genNames() itself starts from - a per-type specialization
+  // is never required since make_field is never actually called here.
+  code += "template <typename T> struct NameProvider;\n";
+  code +=
+      "template <typename T> struct ExclusiveSizeProvider { static "
+      "constexpr size_t size = sizeof(T); };\n";
+  FuncGen::DefineBasicTypeHandlers(code, config_.features);
+  addStandardTypeHandlers(typeGraph, config_.features, code);
+  addTypeHandlers(typeGraph, code);
+}
 
 // Emits the struct's own redeclaration (internal-linkage, layout-identical
 // to the real type - see generate()'s identical trick for introspectImpl)
@@ -1487,6 +1509,11 @@ void CodeGen::generateReconstructClassPreamble(TypeGraph& typeGraph,
   defineInternalTypes(code);  // OIArray<>, used by padding members below
   genDecls(typeGraph, code);
   genDefs(typeGraph, code);
+  // Needed for generateReconstructClassBody's per-member
+  // TypeHandler<Ctx, T>::type::describe use, including for a
+  // container-typed member - must come after genDefs (see this
+  // function's own doc comment for why).
+  emitReconstructTypeHandlerSupport(typeGraph, code);
   code += "using __ROOT_TYPE__ = " + cls.name() + ";\n";
   code += "} // namespace\n} // namespace OIInternal\n";
 }
@@ -1508,9 +1535,32 @@ void CodeGen::generateReconstructClassBody(Class& cls,
   std::vector<ReconstructableMember> members = collectReconstructableMembers(cls);
   size_t n = members.size();
 
+  // Ctx/DB/TypeHandler need to be in scope here, at namespace scope,
+  // because the leaf_i shape declarations just below (also namespace
+  // scope, same reason the pre-existing scalar-only version needed
+  // `static constexpr`: dy::Pair's fields are references, which need
+  // something with a stable address to refer to) reference them. Once
+  // declared here they're equally visible inside the function body below,
+  // for emitReconstructValue's own use of Ctx/DB/TypeHandler - one
+  // declaration serves both.
+  code += "using DB = int;\n";
+  code += "struct OIReconstructFakeCtx { using DataBuffer = DB; };\n";
+  code += "using Ctx = OIReconstructFakeCtx;\n";
+  code += "using OIInternal::TypeHandler;\n";
+  code += "using OIInternal::oi_capture_bytes;\n";
+
+  // Each member's own leaf shape - TypeHandler<Ctx, T>::type::describe
+  // rather than a hand-built dy::Bytes{sizeof(T)}, so a container-typed
+  // member (not just a scalar one) gets its own real wire shape (e.g. a
+  // vector<string> member's shape is that container's own full,
+  // multi-processor Pair chain, not a single fixed-size blob). For a
+  // scalar T this still ends up being dy::Bytes{sizeof(T)} - the same
+  // value as before, just obtained via the same general mechanism as
+  // everything else rather than a special case.
   for (size_t i = 0; i < n; i++) {
-    code += "static constexpr oi::types::dy::Bytes leaf_" + std::to_string(i) +
-            "{sizeof(" + members[i].typeName + ")};\n";
+    code += "static constexpr auto leaf_" + std::to_string(i) +
+            " = TypeHandler<Ctx, " + resolveTypeName(*members[i].type) +
+            ">::type::describe;\n";
   }
   if (n > 1) {
     for (size_t i = n - 1; i-- > 0;) {
@@ -1529,10 +1579,12 @@ void CodeGen::generateReconstructClassBody(Class& cls,
   code += "  auto parsed = oi::exporters::ParsedData::parse(it, " + shapeVar +
           ");\n";
 
+  size_t idCounter = 0;
+  std::vector<std::string> fieldExprs(n);
+
   if (n == 1) {
-    code += "  auto field_0 = oi::exporters::reconstructScalar<" +
-            members[0].typeName +
-            ">(std::get<oi::exporters::ParsedData::Bytes>(parsed.val));\n";
+    fieldExprs[0] =
+        emitReconstructValue(*members[0].type, "parsed", idCounter, code);
   } else {
     // ParsedData::Pair holds Lazy fields, which hold a reference member -
     // that deletes Pair's copy *assignment* (though not construction), so
@@ -1544,16 +1596,13 @@ void CodeGen::generateReconstructClassBody(Class& cls,
     code += "  auto pair_0 = std::get<oi::exporters::ParsedData::Pair>(parsed."
             "val);\n";
     for (size_t i = 0; i < n - 1; i++) {
-      code += "  auto field_" + std::to_string(i) +
-              " = oi::exporters::reconstructScalar<" + members[i].typeName +
-              ">(std::get<oi::exporters::ParsedData::Bytes>(pair_" +
-              std::to_string(i) + ".first().val));\n";
+      fieldExprs[i] = emitReconstructValue(
+          *members[i].type, "pair_" + std::to_string(i) + ".first()",
+          idCounter, code);
       if (i == n - 2) {
-        code += "  auto field_" + std::to_string(i + 1) +
-                " = oi::exporters::reconstructScalar<" +
-                members[i + 1].typeName +
-                ">(std::get<oi::exporters::ParsedData::Bytes>(pair_" +
-                std::to_string(i) + ".second().val));\n";
+        fieldExprs[i + 1] = emitReconstructValue(
+            *members[i + 1].type, "pair_" + std::to_string(i) + ".second()",
+            idCounter, code);
       } else {
         code += "  auto next_" + std::to_string(i) + " = pair_" +
                 std::to_string(i) + ".second();\n";
@@ -1566,8 +1615,8 @@ void CodeGen::generateReconstructClassBody(Class& cls,
 
   code += "  return OIInternal::__ROOT_TYPE__{\n";
   for (size_t i = 0; i < n; i++) {
-    code += "    ." + std::string(members[i].name) + " = field_" +
-            std::to_string(i) + ",\n";
+    code += "    ." + std::string(members[i].name) + " = " + fieldExprs[i] +
+            ",\n";
   }
   code += "  };\n";
   code += "}\n";
@@ -1614,9 +1663,7 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
                                           const std::string& parsedDataExpr,
                                           size_t& idCounter,
                                           std::string& code) {
-  Type* resolved = &elemType;
-  while (auto* td = dynamic_cast<Typedef*>(resolved))
-    resolved = &td->underlyingType();
+  Type* resolved = &unwrapTypedefs(elemType);
 
   const std::string v = "v" + std::to_string(idCounter++);
   code += "  auto " + v + "_data = " + parsedDataExpr + ";\n";
@@ -1843,20 +1890,19 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
   code += "#include <span>\n";
   code += "#include <vector>\n\n";
 
-  if (container) {
-    // Only the container path needs the TypeHandler<Ctx, T>/st:: describe
-    // machinery - generate()'s equivalent (combined) path already has both
-    // via addIncludes()/DefineBasicTypeHandlers(), so this is confined to
-    // the standalone case. TypeHandler is wrapped in the same
-    // namespace OIInternal { namespace { ... } } generate() itself uses,
-    // so generateReconstructContainerBody's `using OIInternal::TypeHandler;`
-    // resolves identically regardless of which path produced it.
+  if (container || cls) {
+    // Both a container root and a class root can now need the
+    // TypeHandler<Ctx, T>/st:: describe machinery - a class might have a
+    // container-typed member (see generateReconstructClassBody). generate()'s
+    // equivalent (combined) path already has all of this via
+    // addIncludes()/DefineBasicTypeHandlers()/etc, so this is confined to
+    // the standalone case.
     //
     // Reuses addIncludes() rather than hand-listing headers specifically
     // so a *nested* container's header (e.g. <string>, for a
-    // vector<string> root) is picked up too - addIncludes already walks
-    // every reachable type in typeGraph.finalTypes for exactly this
-    // purpose on generate()'s side.
+    // vector<string> root or member) is picked up too - addIncludes
+    // already walks every reachable type in typeGraph.finalTypes for
+    // exactly this purpose on generate()'s side.
     addIncludes(typeGraph, config_, code);
     // DefineBasicTypeHandlers' own emitted code uses inst::/result::/
     // ParsedData/types::st:: unqualified, and (in its pointer branch, which
@@ -1873,39 +1919,27 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
     code += "using oi::exporters::ParsedData;\n";
     code += "using namespace oi::exporters;\n";
     FuncGen::DefineJitLog(code, config_.features);
+  }
+
+  if (container) {
+    // TypeHandler is wrapped in the same namespace OIInternal { namespace
+    // { ... } } generate() itself uses, so generateReconstructContainerBody's
+    // `using OIInternal::TypeHandler;` resolves identically regardless of
+    // which path produced it. A Class root's equivalent block lives inside
+    // generateReconstructClassPreamble instead (called below), since there
+    // it has to run after the struct's own redeclaration, not before -
+    // see that function's doc comment for why.
     code += "namespace OIInternal {\nnamespace {\n";
-    // DefineBasicTypeHandlers' make_field<Ctx,T>() (never instantiated by
-    // this path, but still parsed as part of the template definition)
-    // references these dependent names, which two-phase lookup needs
-    // declared as templates regardless. ExclusiveSizeProvider needs its
-    // real generic definition (make_field's own use is unconditional, not
-    // gated behind an `if constexpr`); NameProvider only needs the forward
-    // declaration genNames() itself starts from - a per-type specialization
-    // is never required since make_field is never actually called here.
-    code += "template <typename T> struct NameProvider;\n";
-    code +=
-        "template <typename T> struct ExclusiveSizeProvider { static "
-        "constexpr size_t size = sizeof(T); };\n";
-    // addStandardTypeHandlers (below) unconditionally sets up a
-    // TypeHandler<Ctx, OIArray<T0,N0>> specialization (for padding
-    // members generate() itself would have added) - OIArray<> the
-    // template needs to actually exist for that to compile, even though
-    // no reconstructable root here ever has padding members of its own.
+    // addStandardTypeHandlers (inside emitReconstructTypeHandlerSupport)
+    // unconditionally sets up a TypeHandler<Ctx, OIArray<T0,N0>>
+    // specialization (for padding members generate() itself would have
+    // added) - OIArray<> the template needs to actually exist for that to
+    // compile, even though no reconstructable root here ever has padding
+    // members of its own. (The class case gets this from
+    // generateReconstructClassPreamble's own defineInternalTypes call
+    // instead, needed there for a different reason - see its comment.)
     defineInternalTypes(code);
-    FuncGen::DefineBasicTypeHandlers(code, config_.features);
-    // Generic TypeHandler above only covers scalars/pointers - a
-    // container-typed element (e.g. std::string inside a
-    // std::vector<std::string> root) needs its *own* TypeHandler
-    // specialization too, for the same reason generate() itself needs
-    // this pair of calls: TypeHandler<Ctx, T0>::type (referenced by an
-    // outer container's own processor strings, e.g. seq_type.toml's
-    // `typename TypeHandler<Ctx, T0>::type`) only resolves to the right
-    // shape if that specialization actually exists. addTypeHandlers walks
-    // typeGraph.finalTypes, which already contains every container
-    // reachable from this root (transform() ran before this function was
-    // called), so this covers arbitrary nesting depth for free.
-    addStandardTypeHandlers(typeGraph, config_.features, code);
-    addTypeHandlers(typeGraph, code);
+    emitReconstructTypeHandlerSupport(typeGraph, code);
     code += "} // namespace\n} // namespace OIInternal\n";
   }
 
