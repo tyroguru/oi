@@ -1150,6 +1150,26 @@ void addStandardTypeHandlers(TypeGraph& typeGraph,
 void CodeGen::addTypeHandlers(const TypeGraph& typeGraph, std::string& code) {
   for (const Type& t : typeGraph.finalTypes) {
     if (const auto* c = dynamic_cast<const Class*>(&t)) {
+      // Research groundwork for byte-accurate object capture/reconstruction
+      // (see docs/object-capture-initial-thoughts.md, not part of this repo)
+      // - a union's own members have already been cleared by RemoveMembers
+      // ("we can't tell which member is active, so it's not safe to measure
+      // any of them") and replaced by AddPadding with a single opaque
+      // padding entry spanning the union's full size - so a bespoke
+      // member-walking TypeHandler for it would just walk that one skipped
+      // padding entry and capture nothing. Deliberately emitting no
+      // specialization here instead lets ordinary C++ template resolution
+      // fall through to TypeHandler's generic primary template (see
+      // FuncGen::DefineBasicTypeHandlers), which already does exactly the
+      // right thing for any complete, trivially-copyable, non-pointer T:
+      // capture its raw bytes as one opaque Bytes<sizeof(T)> leaf under the
+      // capture-bytes feature, or Unit (nothing) otherwise - identical to
+      // today's observable behaviour when capture-bytes is off, and the
+      // same "N raw bytes, no semantic content" treatment already applied
+      // to scalars and enums when it's on.
+      if (c->kind() == Class::Kind::Union) {
+        continue;
+      }
       genClassTypeHandler(*c, code);
     } else if (const auto* con = dynamic_cast<const Container*>(&t)) {
       genContainerTypeHandler(
@@ -1392,6 +1412,16 @@ std::string resolveTypeName(Type& t) {
   if (auto* en = dynamic_cast<Enum*>(&resolved))
     return "OIInternal::" + en->name();
 
+  // A trivially-copyable union (see addTypeHandlers' comment on why it's
+  // reconstructed via the same raw-bytes path as a scalar or enum, not
+  // walked member-by-member) is declared by genDefsClass the same way a
+  // struct/class is - inside `namespace OIInternal { namespace {...} }` -
+  // so it needs the same qualification as an Enum's name to remain
+  // resolvable from reconstructImpl<T>'s global-scope function body.
+  if (auto* cls = dynamic_cast<Class*>(&resolved);
+      cls && cls->kind() == Class::Kind::Union)
+    return "OIInternal::" + cls->name();
+
   if (auto* cont = dynamic_cast<Container*>(&resolved)) {
     if (cont->templateParams.empty())
       throw std::runtime_error("CodeGen::resolveTypeName: " +
@@ -1409,8 +1439,8 @@ std::string resolveTypeName(Type& t) {
 
   throw std::runtime_error(
       "CodeGen::resolveTypeName: " + resolved.name() +
-      " is neither a scalar, an enum, nor a container - cannot name its "
-      "reconstructed type");
+      " is neither a scalar, an enum, a trivially-copyable union, nor a "
+      "container - cannot name its reconstructed type");
 }
 
 struct ReconstructableMember {
@@ -1460,16 +1490,18 @@ std::vector<ReconstructableMember> collectReconstructableMembers(
       continue;
 
     Type& resolved = unwrapTypedefs(member.type());
+    const auto* resolvedClass = dynamic_cast<Class*>(&resolved);
+    bool isUnion = resolvedClass && resolvedClass->kind() == Class::Kind::Union;
     if (!dynamic_cast<Primitive*>(&resolved) &&
-        !dynamic_cast<Enum*>(&resolved) &&
+        !dynamic_cast<Enum*>(&resolved) && !isUnion &&
         !dynamic_cast<Container*>(&resolved)) {
       throw std::runtime_error(
           "CodeGen::generateReconstructClass: member " + cls.name() + "::" +
           member.name +
-          " is neither a scalar, an enum, nor a reconstructable container "
-          "- not yet supported (see docs/object-capture-initial-thoughts.md "
-          "- pointer fixup and nested class members are not yet "
-          "implemented)");
+          " is neither a scalar, an enum, a union, nor a reconstructable "
+          "container - not yet supported (see "
+          "docs/object-capture-initial-thoughts.md - pointer fixup and "
+          "nested (non-union) class members are not yet implemented)");
     }
 
     members.push_back({.name = member.name, .type = &resolved});
@@ -1714,12 +1746,29 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
            ">(std::get<oi::exporters::ParsedData::Bytes>(" + v + "_data.val))";
   }
 
+  if (auto* cls = dynamic_cast<Class*>(resolved);
+      cls && cls->kind() == Class::Kind::Union) {
+    // A union's members are already unknown to us by this point (see
+    // addTypeHandlers' comment) - the write side captured its raw bytes as
+    // one opaque Bytes<sizeof(T)> leaf, exactly like a scalar or enum, so
+    // reconstruction is the same bit_cast round trip. Only sound for a
+    // trivially-copyable union (true for essentially every real-world raw
+    // C-style union - one holding a non-trivial member forces the
+    // developer to write that union's special member functions by hand,
+    // which is rare and deliberate) - reconstructScalar<T>'s own
+    // std::bit_cast requires this at compile time, so a union that somehow
+    // isn't trivially copyable fails to build here with a clear compiler
+    // error rather than silently doing something unsafe.
+    return "oi::exporters::reconstructScalar<" + resolveTypeName(*resolved) +
+           ">(std::get<oi::exporters::ParsedData::Bytes>(" + v + "_data.val))";
+  }
+
   auto* cont = dynamic_cast<Container*>(resolved);
   if (!cont) {
     throw std::runtime_error(
         "CodeGen::emitReconstructValue: " + resolved->name() +
-        " is neither a scalar, an enum, nor a reconstructable container - "
-        "not yet supported");
+        " is neither a scalar, an enum, a union, nor a reconstructable "
+        "container - not yet supported");
   }
 
   const ContainerInfo& info = cont->containerInfo_;
