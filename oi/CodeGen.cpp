@@ -1369,6 +1369,37 @@ const Primitive* resolvePrimitiveMember(const Member& m) {
   return resolvePrimitive(m.type());
 }
 
+// Recursively names the concrete C++ type reconstruction should produce
+// for `t` - a Primitive's own name, or a reconstructable Container
+// parameterized by its own element type's name in turn (e.g.
+// "std::vector<std::__cxx11::basic_string<char>>"). Needed because
+// Container::name() alone is just the bare container name with no
+// template arguments (e.g. "std::vector") - not enough to name a
+// concrete, constructible type on its own. See generateReconstructContainerBody's
+// t0Name comment for the known char/int8_t caveat this inherits.
+std::string resolveTypeName(Type& t) {
+  Type* resolved = &t;
+  while (auto* td = dynamic_cast<Typedef*>(resolved))
+    resolved = &td->underlyingType();
+
+  if (auto* prim = dynamic_cast<Primitive*>(resolved))
+    return prim->name();
+
+  if (auto* cont = dynamic_cast<Container*>(resolved)) {
+    if (cont->templateParams.empty())
+      throw std::runtime_error("CodeGen::resolveTypeName: " +
+                               cont->containerInfo_.typeName +
+                               " has no template parameters");
+    return cont->containerInfo_.typeName + "<" +
+           resolveTypeName(cont->templateParams[0].type()) + ">";
+  }
+
+  throw std::runtime_error(
+      "CodeGen::resolveTypeName: " + resolved->name() +
+      " is neither a scalar nor a container - cannot name its "
+      "reconstructed type");
+}
+
 struct ReconstructableMember {
   std::string_view name;
   std::string typeName;
@@ -1555,66 +1586,190 @@ void CodeGen::generateReconstructClassBody(Class& cls,
 // Unlike a Class root, a container never needs an OIInternal redeclaration:
 // std::vector<int32_t> is already a complete, nameable type given its own
 // header, with no user-defined-type-visibility problem to work around.
-void CodeGen::generateReconstructContainerBody(Container& container,
-                                               const std::string& typeToHash,
-                                               std::string& code) {
-  const ContainerInfo& info = container.containerInfo_;
+// The recursive core of container reconstruction: decodes one value of
+// type `elemType` from the ParsedData produced by evaluating
+// `parsedDataExpr` - a C++ expression - *exactly once* (materialized
+// immediately into a local, since `parsedDataExpr` may itself be a Lazy
+// invocation like `list.values()`, which must never be evaluated twice -
+// see drainParsedData's doc comment for why Lazy is this fussy). Emits
+// whatever statements decoding `elemType` needs into `code`, and returns
+// a C++ expression - always safe to reference multiple times - evaluating
+// to a live value of `elemType`'s own C++ type.
+//
+// `idCounter` is threaded through (incremented once per call, including
+// recursive ones) purely to keep every call's emitted local variable
+// names distinct - not because two calls can currently land in the same
+// C++ scope (they can't yet: a "list"-kind container's element decode
+// always happens inside nextElement()'s own lambda body, a fresh scope
+// per call site), but because relying on that staying true forever, once
+// e.g. a class with multiple container members exists, would be a latent
+// bug waiting to happen. Cheap insurance now, not speculative generality.
+//
+// A Container element recurses: its own `codegen.reconstruct` body is
+// spliced in as an immediately-invoked lambda (`[&]() -> Type { ... }()`),
+// letting its result be used as an ordinary expression by whichever level
+// called it - the same mechanism whether this is the outermost call (see
+// generateReconstructContainerBody below) or a nested one.
+std::string CodeGen::emitReconstructValue(Type& elemType,
+                                          const std::string& parsedDataExpr,
+                                          size_t& idCounter,
+                                          std::string& code) {
+  Type* resolved = &elemType;
+  while (auto* td = dynamic_cast<Typedef*>(resolved))
+    resolved = &td->underlyingType();
+
+  const std::string v = "v" + std::to_string(idCounter++);
+  code += "  auto " + v + "_data = " + parsedDataExpr + ";\n";
+
+  if (auto* prim = dynamic_cast<Primitive*>(resolved)) {
+    // NOTE, a known, verified-but-not-guaranteed limitation: see
+    // resolveTypeName's comment - Primitive::Kind conflates char with
+    // int8_t/signed char, which matters here too if this scalar is ever
+    // named as a type (it isn't, in this branch - reconstructScalar<T>
+    // only needs T's size/bit-pattern, which int8_t and char share).
+    return "oi::exporters::reconstructScalar<" + prim->name() +
+           ">(std::get<oi::exporters::ParsedData::Bytes>(" + v + "_data.val))";
+  }
+
+  auto* cont = dynamic_cast<Container*>(resolved);
+  if (!cont) {
+    throw std::runtime_error(
+        "CodeGen::emitReconstructValue: " + resolved->name() +
+        " is neither a scalar nor a reconstructable container - not yet "
+        "supported");
+  }
+
+  const ContainerInfo& info = cont->containerInfo_;
   if (info.codegen.reconstruct.empty()) {
     throw std::runtime_error(
-        "CodeGen::generateReconstructContainerBody: " + info.typeName +
+        "CodeGen::emitReconstructValue: " + info.typeName +
         " has no `codegen.reconstruct` defined - not yet reconstructable");
   }
   if (info.codegen.reconstructKind != "list" &&
       info.codegen.reconstructKind != "bytes") {
     throw std::runtime_error(
-        "CodeGen::generateReconstructContainerBody: " + info.typeName +
+        "CodeGen::emitReconstructValue: " + info.typeName +
         " has `codegen.reconstruct` but an unrecognized or missing "
         "`codegen.reconstruct_kind` ('" + info.codegen.reconstructKind +
         "') - expected \"list\" or \"bytes\"");
   }
-  if (container.templateParams.empty()) {
+  if (cont->templateParams.empty()) {
     throw std::runtime_error(
-        "CodeGen::generateReconstructContainerBody: " + info.typeName +
+        "CodeGen::emitReconstructValue: " + info.typeName +
         " has no template parameters to reconstruct an element type from");
   }
-  const Primitive* elementType =
-      resolvePrimitive(container.templateParams[0].type());
-  if (!elementType) {
-    throw std::runtime_error(
-        "CodeGen::generateReconstructContainerBody: " + info.typeName +
-        "'s element type is not a scalar - only scalar-element containers "
-        "are currently supported (see "
-        "docs/object-capture-initial-thoughts.md)");
-  }
-  // NOTE, a known, verified-but-not-guaranteed limitation: Primitive::Kind
-  // has no separate case for `char` - it's classified as Kind::Int8
-  // alongside `signed char`/`int8_t`, so t0Name below is always "int8_t"
-  // for a char-element container, never "char". For std::string that means
-  // the return type this function declares is std::basic_string<int8_t>,
-  // not std::basic_string<char> - a nominally different type. This is safe
-  // only because (a) the mangled symbol name the linker actually binds on
-  // comes from the caller's real AST via typeToHash, not from any C++ text
-  // this function writes, and (b) libstdc++'s basic_string<CharT> layout
-  // depends only on sizeof(CharT), not CharT's identity - verified
-  // empirically (see docs/object-capture-initial-thoughts.md), not
-  // guaranteed by the standard. Fixing this properly means giving
-  // Primitive::Kind a distinct case for char, a broader type-graph change
-  // out of scope here.
-  const std::string& t0Name = elementType->name();
 
   const auto& processors = info.codegen.processors;
   size_t n = processors.size();
   if (n == 0) {
     throw std::runtime_error(
-        "CodeGen::generateReconstructContainerBody: " + info.typeName +
+        "CodeGen::emitReconstructValue: " + info.typeName +
         " has no codegen.processor entries to decode captured bytes from");
   }
+
+  // Walk this container's own processor chain - exactly the same
+  // "discard everything but the last, but drain every discarded one
+  // fully" logic as the top level (see generateReconstructContainerBody's
+  // original comment, preserved in spirit here). v_data is already
+  // shaped per this container's own TypeHandler<Ctx,T>::type - either
+  // from an explicit ParsedData::parse call (the outermost call) or from
+  // a Lazy invocation like list.values() that used that same describe
+  // value internally (a nested call) - either way no second parse is
+  // needed here, just walking what's already there.
+  std::string lastVal = v + "_data";
+  if (n > 1) {
+    code += "  auto " + v + "_pair_0 = std::get<oi::exporters::ParsedData::"
+            "Pair>(" + lastVal + ".val);\n";
+    code += "  oi::exporters::drainParsedData(" + v + "_pair_0.first());\n";
+    for (size_t i = 0; i < n - 1; i++) {
+      if (i == n - 2) {
+        lastVal = v + "_last";
+        code += "  auto " + lastVal + " = " + v + "_pair_" +
+                std::to_string(i) + ".second();\n";
+      } else {
+        code += "  auto " + v + "_next_" + std::to_string(i) + " = " + v +
+                "_pair_" + std::to_string(i) + ".second();\n";
+        code += "  auto " + v + "_pair_" + std::to_string(i + 1) +
+                " = std::get<oi::exporters::ParsedData::Pair>(" + v +
+                "_next_" + std::to_string(i) + ".val);\n";
+        code += "  oi::exporters::drainParsedData(" + v + "_pair_" +
+                std::to_string(i + 1) + ".first());\n";
+      }
+    }
+  }
+
+  if (info.codegen.reconstructKind == "list") {
+    code += "  auto " + v + "_list = std::get<oi::exporters::ParsedData::"
+            "List>(" + lastVal + ".val);\n";
+    code += "  size_t length = " + v + "_list.length;\n";
+
+    // Recurse for the element type - its own decode statements land
+    // inside nextElement()'s lambda body, its own fresh C++ scope, so
+    // reusing unprefixed names like `length`/`nextElement` again one
+    // level down (for a container-of-containers) can't collide with
+    // this level's.
+    std::string nextElemCode;
+    std::string nextElemExpr =
+        emitReconstructValue(cont->templateParams[0].type(),
+                             v + "_list.values()", idCounter, nextElemCode);
+    code += "  auto nextElement = [&]() {\n";
+    code += nextElemCode;
+    code += "    return " + nextElemExpr + ";\n";
+    code += "  };\n";
+  } else {
+    // "bytes": the whole reconstructable content is one contiguous
+    // captured byte blob (e.g. a string's characters), not a per-element
+    // list - nothing left to decode, just hand the raw bytes over.
+    code += "  auto contentBytes = std::get<oi::exporters::ParsedData::"
+            "DynBytes>(" + lastVal + ".val).value;\n";
+  }
+
+  const std::string resultVar = v + "_result";
+  code += "  auto " + resultVar + " = [&]() -> " + resolveTypeName(*cont) +
+          " {\n";
+  // T0 must mean *this* container's own element type inside its own
+  // reconstruct body - shadowing whatever T0 an enclosing level (if any)
+  // already declared. Without this, a nested container's reconstruct body
+  // (e.g. a vector<string>'s element string) would incorrectly see the
+  // outermost container's T0 instead of its own, since bare `T0` is
+  // otherwise just an unqualified name looked up in the enclosing scope.
+  code += "    using T0 = " +
+          resolveTypeName(cont->templateParams[0].type()) + ";\n";
+  code += (boost::format(info.codegen.reconstruct) % info.typeName).str();
+  code += "\n  }();\n";
+
+  return resultVar;
+}
+
+void CodeGen::generateReconstructContainerBody(Container& container,
+                                               const std::string& typeToHash,
+                                               std::string& code) {
+  if (container.templateParams.empty()) {
+    throw std::runtime_error(
+        "CodeGen::generateReconstructContainerBody: " +
+        container.containerInfo_.typeName +
+        " has no template parameters to reconstruct an element type from");
+  }
+
+  const std::string containerType = resolveTypeName(container);
+  const std::string t0Name = resolveTypeName(container.templateParams[0].type());
 
   // The container's full wire shape, exactly as genContainerTypeHandler
   // builds it for the write side (see CodeGen.cpp above) - a right-nested
   // Pair of every processor's type, in order. Reused verbatim (not
   // re-derived) specifically so this can never drift out of sync with what
-  // the write side actually produced.
+  // the write side actually produced. This is the one and only explicit
+  // ParsedData::parse call needed anywhere in this reconstruction - every
+  // nested element beneath it (see emitReconstructValue) is already
+  // correctly shaped by its own enclosing List/Pair's own Lazy machinery.
+  const auto& processors = container.containerInfo_.codegen.processors;
+  size_t n = processors.size();
+  if (n == 0) {
+    throw std::runtime_error(
+        "CodeGen::generateReconstructContainerBody: " +
+        container.containerInfo_.typeName +
+        " has no codegen.processor entries to decode captured bytes from");
+  }
   std::string shapeType;
   for (size_t i = 0; i < n; i++) {
     if (i != n - 1)
@@ -1625,82 +1780,34 @@ void CodeGen::generateReconstructContainerBody(Container& container,
   }
   shapeType += std::string(n - 1, '>');
 
-  const std::string containerType = info.typeName + "<" + t0Name + ">";
-
   code += "extern \"C\" " + containerType + " " + typeToHash +
           "(std::span<const uint8_t> bytes) {\n";
   code += "  using DB = int;\n";
   code += "  struct OIReconstructFakeCtx { using DataBuffer = DB; };\n";
   code += "  using Ctx = OIReconstructFakeCtx;\n";
+  // T0 is the outermost container's own element type - needed as a bare
+  // name for its processor type strings (e.g. seq_type.toml's
+  // `typename TypeHandler<Ctx, T0>::type`) to resolve; a nested element's
+  // own T0 (if it's itself a container) is handled the same way, but as a
+  // local inside emitReconstructValue's own lambda scope, not here.
   code += "  using T0 = " + t0Name + ";\n";
   // TypeHandler and oi_capture_bytes are always emitted inside
   // namespace OIInternal { namespace {...} } - both by generate() (the
   // combined case) and by generateReconstruct() itself (the standalone
   // case, which wraps its own FuncGen::DefineBasicTypeHandlers call the
   // same way) specifically so these lines resolve identically either way.
-  // The processor type strings below reference both unqualified (a
-  // "bytes"-kind container's content processor is typically
-  // std::conditional_t<oi_capture_bytes, DynBytes<DB>, Unit<DB>>).
   code += "  using OIInternal::TypeHandler;\n";
   code += "  using OIInternal::oi_capture_bytes;\n";
   code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
   code += "  auto it = vec.cbegin();\n";
-  code += "  auto parsed = oi::exporters::ParsedData::parse(it, " +
-          shapeType + "::describe);\n";
 
-  // Every processor except the last is profiler bookkeeping (va-intervals,
-  // pointer, capacity, ...) this reconstruction has no use for - but their
-  // bytes still have to be walked in order, exactly like a Class's members
-  // (see generateReconstructClassBody): ParsedData::Pair's fields are Lazy
-  // thunks sharing one live iterator. Unlike the Class case, this code
-  // doesn't want first()'s *value* at each level, only its side effect of
-  // advancing the iterator - and since a discarded processor can itself be
-  // an arbitrarily nested Pair/List/Sum (e.g. the va-interval processor is
-  // a List of Pairs), a single first()/second() call one level deep is not
-  // enough to fully consume it; drainParsedData() recursively invokes every
-  // Lazy underneath it, however deeply nested (see its doc comment).
-  if (n == 1) {
-    code += "  auto& lastVal = parsed;\n";
-  } else {
-    code +=
-        "  auto pair_0 = std::get<oi::exporters::ParsedData::Pair>(parsed."
-        "val);\n";
-    code += "  oi::exporters::drainParsedData(pair_0.first());\n";
-    for (size_t i = 0; i < n - 1; i++) {
-      if (i == n - 2) {
-        code += "  auto lastVal = pair_" + std::to_string(i) + ".second();\n";
-      } else {
-        code += "  auto next_" + std::to_string(i) + " = pair_" +
-                std::to_string(i) + ".second();\n";
-        code += "  auto pair_" + std::to_string(i + 1) +
-                " = std::get<oi::exporters::ParsedData::Pair>(next_" +
-                std::to_string(i) + ".val);\n";
-        code += "  oi::exporters::drainParsedData(pair_" +
-                std::to_string(i + 1) + ".first());\n";
-      }
-    }
-  }
+  size_t idCounter = 0;
+  std::string valueExpr = emitReconstructValue(
+      container,
+      "oi::exporters::ParsedData::parse(it, " + shapeType + "::describe)",
+      idCounter, code);
 
-  if (info.codegen.reconstructKind == "list") {
-    code +=
-        "  auto list = std::get<oi::exporters::ParsedData::List>(lastVal."
-        "val);\n";
-    code += "  size_t length = list.length;\n";
-    code +=
-        "  auto nextElement = [&list]() { return "
-        "oi::exporters::reconstructScalar<T0>(std::get<oi::exporters::"
-        "ParsedData::Bytes>(list.values().val)); };\n";
-  } else {
-    // "bytes": the whole reconstructable content is one contiguous
-    // captured byte blob (e.g. a string's characters), not a per-element
-    // list - nothing left to decode, just hand the raw bytes over.
-    code +=
-        "  auto contentBytes = "
-        "std::get<oi::exporters::ParsedData::DynBytes>(lastVal.val).value;"
-        "\n";
-  }
-
-  code += (boost::format(info.codegen.reconstruct) % info.typeName).str();
+  code += "  return " + valueExpr + ";\n";
   code += "}\n";
 }
 
@@ -1737,28 +1844,31 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
   code += "#include <vector>\n\n";
 
   if (container) {
-    // Only the container path needs the TypeHandler<Ctx, T0>/st:: describe
+    // Only the container path needs the TypeHandler<Ctx, T>/st:: describe
     // machinery - generate()'s equivalent (combined) path already has both
     // via addIncludes()/DefineBasicTypeHandlers(), so this is confined to
     // the standalone case. TypeHandler is wrapped in the same
     // namespace OIInternal { namespace { ... } } generate() itself uses,
     // so generateReconstructContainerBody's `using OIInternal::TypeHandler;`
     // resolves identically regardless of which path produced it.
-    code += "#define DEFINE_DESCRIBE 1\n";
-    code += "#include <oi/types/st.h>\n";
-    code += "#include <oi/exporters/inst.h>\n";  // also brings in result/Element.h
-    code += "#include <" + container->containerInfo_.header + ">\n\n";
+    //
+    // Reuses addIncludes() rather than hand-listing headers specifically
+    // so a *nested* container's header (e.g. <string>, for a
+    // vector<string> root) is picked up too - addIncludes already walks
+    // every reachable type in typeGraph.finalTypes for exactly this
+    // purpose on generate()'s side.
+    addIncludes(typeGraph, config_, code);
     // DefineBasicTypeHandlers' own emitted code uses inst::/result::/
     // ParsedData/types::st:: unqualified, and (in its pointer branch, which
-    // T0 never instantiates but still has to parse) the JLOG/JLOGPTR
-    // macros - all normally brought into scope by generate()'s preamble,
-    // which this standalone path doesn't otherwise run. Deliberately no
-    // `using namespace oi::detail;` here (unlike generate()'s equivalent
-    // preamble): that only compiles there because generate() has already
-    // declared real content under oi::detail::DataBuffer earlier in the
-    // same file, which is what makes oi::detail a name the compiler
-    // recognizes at all - nothing in this path ever opens that namespace,
-    // and nothing generateReconstructContainerBody emits needs it.
+    // a scalar T never instantiates but still has to parse) the
+    // JLOG/JLOGPTR macros - all normally brought into scope by generate()'s
+    // preamble, which this standalone path doesn't otherwise run.
+    // Deliberately no `using namespace oi::detail;` here (unlike
+    // generate()'s equivalent preamble): that only compiles there because
+    // generate() has already declared real content under
+    // oi::detail::DataBuffer earlier in the same file, which is what makes
+    // oi::detail a name the compiler recognizes at all - nothing in this
+    // path ever opens that namespace, and nothing this path emits needs it.
     code += "using namespace oi;\n";
     code += "using oi::exporters::ParsedData;\n";
     code += "using namespace oi::exporters;\n";
@@ -1776,7 +1886,26 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
     code +=
         "template <typename T> struct ExclusiveSizeProvider { static "
         "constexpr size_t size = sizeof(T); };\n";
+    // addStandardTypeHandlers (below) unconditionally sets up a
+    // TypeHandler<Ctx, OIArray<T0,N0>> specialization (for padding
+    // members generate() itself would have added) - OIArray<> the
+    // template needs to actually exist for that to compile, even though
+    // no reconstructable root here ever has padding members of its own.
+    defineInternalTypes(code);
     FuncGen::DefineBasicTypeHandlers(code, config_.features);
+    // Generic TypeHandler above only covers scalars/pointers - a
+    // container-typed element (e.g. std::string inside a
+    // std::vector<std::string> root) needs its *own* TypeHandler
+    // specialization too, for the same reason generate() itself needs
+    // this pair of calls: TypeHandler<Ctx, T0>::type (referenced by an
+    // outer container's own processor strings, e.g. seq_type.toml's
+    // `typename TypeHandler<Ctx, T0>::type`) only resolves to the right
+    // shape if that specialization actually exists. addTypeHandlers walks
+    // typeGraph.finalTypes, which already contains every container
+    // reachable from this root (transform() ran before this function was
+    // called), so this covers arbitrary nesting depth for free.
+    addStandardTypeHandlers(typeGraph, config_.features, code);
+    addTypeHandlers(typeGraph, code);
     code += "} // namespace\n} // namespace OIInternal\n";
   }
 
