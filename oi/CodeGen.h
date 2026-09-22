@@ -39,6 +39,7 @@ class Container;
 class Member;
 class PassManager;
 class Primitive;
+class Type;
 }  // namespace oi::detail::type_graph
 
 namespace oi::detail {
@@ -130,6 +131,10 @@ class CodeGen {
   void generateReconstructContainerBody(type_graph::Container& container,
                                         const std::string& typeToHash,
                                         std::string& code);
+  std::string emitReconstructValue(type_graph::Type& elemType,
+                                   const std::string& parsedDataExpr,
+                                   size_t& idCounter,
+                                   std::string& code);
 
   type_graph::TypeGraph typeGraph_;
   const OICodeGenConfig& config_;
