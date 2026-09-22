@@ -91,20 +91,41 @@ class CodeGen {
    * type's captured bytes, produce a live instance of it. Supports a
    * scalar (Primitive) root type, and a flat struct/class of scalar
    * members (raw byte replay, no pointer fixup or nested class/container
-   * members yet) - see generateReconstructScalar/generateReconstructClass.
+   * members yet) - see generateReconstructScalar/generateReconstructClassBody.
+   * Self-contained: clears `code` and emits its own includes/preamble, for
+   * use when nothing else populated `code` for this TypeGraph first. For
+   * the combined introspect+reconstruct-of-the-same-root case, see
+   * appendReconstructFunctionBody below instead.
    */
   void generateReconstruct(type_graph::TypeGraph& typeGraph,
                            std::string& code,
                            RootFunctionName rootName);
 
+  /*
+   * The combined introspect+reconstruct case: appends reconstructImpl<T>'s
+   * function body to `code` right after a generate() call already
+   * populated it for introspectImpl<T> of the *same* root T (see
+   * OIGenerator::generate()'s same-type check, which is what guarantees
+   * that). Unlike generateReconstruct(), does not clear `code`, does not
+   * emit includes/preamble, and - for a Class root - does not re-emit the
+   * struct's OIInternal redeclaration, since generate() already emitted an
+   * equivalent one for the same root; emitting it twice would be a
+   * redefinition error.
+   */
+  void appendReconstructFunctionBody(type_graph::TypeGraph& typeGraph,
+                                     std::string& code,
+                                     RootFunctionName rootName);
+
  private:
   void generateReconstructScalar(type_graph::Primitive& primitive,
                                  const std::string& typeToHash,
                                  std::string& code);
-  void generateReconstructClass(type_graph::TypeGraph& typeGraph,
-                                type_graph::Class& cls,
-                                const std::string& typeToHash,
-                                std::string& code);
+  void generateReconstructClassPreamble(type_graph::TypeGraph& typeGraph,
+                                        type_graph::Class& cls,
+                                        std::string& code);
+  void generateReconstructClassBody(type_graph::Class& cls,
+                                    const std::string& typeToHash,
+                                    std::string& code);
 
   type_graph::TypeGraph typeGraph_;
   const OICodeGenConfig& config_;
