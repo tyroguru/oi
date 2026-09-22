@@ -88,6 +88,7 @@ class ConsumerContext {
 
   type_graph::TypeGraph typeGraph;
   std::unordered_map<std::string, type_graph::Type*> nameToTypeMap;
+  std::unordered_map<std::string, type_graph::Type*> nameToReconstructTypeMap;
   std::optional<bool> pic;
   const std::vector<std::unique_ptr<ContainerInfo>>& containerInfos;
   std::set<std::string_view> typesToStub;
@@ -181,16 +182,15 @@ int OIGenerator::generate(clang::tooling::CompilationDatabase& db,
     return ret;
   }
 
-  if (ctx.nameToTypeMap.size() > 1)
+  if (ctx.nameToTypeMap.size() + ctx.nameToReconstructTypeMap.size() > 1)
     throw std::logic_error(
         "found more than one site to generate for but we can't currently "
         "handle this case");
 
-  if (ctx.nameToTypeMap.empty()) {
+  if (ctx.nameToTypeMap.empty() && ctx.nameToReconstructTypeMap.empty()) {
     LOG(ERROR) << "Nothing to generate!";
     return failIfNothingGenerated ? -1 : 0;
   }
-  const auto& linkageName = ctx.nameToTypeMap.begin()->first;
 
   compilerConfig.usePIC = ctx.pic.value();
   CodeGen codegen{generatorConfig};
@@ -199,7 +199,14 @@ int OIGenerator::generate(clang::tooling::CompilationDatabase& db,
   codegen.transform(ctx.typeGraph);
 
   std::string code;
-  codegen.generate(ctx.typeGraph, code, CodeGen::ExactName{linkageName});
+  if (!ctx.nameToTypeMap.empty()) {
+    const auto& linkageName = ctx.nameToTypeMap.begin()->first;
+    codegen.generate(ctx.typeGraph, code, CodeGen::ExactName{linkageName});
+  } else {
+    const auto& linkageName = ctx.nameToReconstructTypeMap.begin()->first;
+    codegen.generateReconstruct(ctx.typeGraph, code,
+                                CodeGen::ExactName{linkageName});
+  }
 
   std::string sourcePath = sourceFileDumpPath;
   if (sourceFileDumpPath.empty()) {
@@ -240,62 +247,105 @@ class CreateTypeGraphConsumer : public clang::ASTConsumer {
       return;
     }
 
-    auto introspectImpl =
-        std::move(oi_namespaces) |
-        ranges::views::for_each([](auto* ns) { return ns->decls(); }) |
-        ranges::views::transform([](auto* p) {
-          return llvm::dyn_cast<clang::FunctionTemplateDecl>(p);
-        }) |
-        ranges::views::filter([](auto* td) {
-          return td != nullptr && td->getName() == "introspectImpl";
-        }) |
-        ranges::views::take(1) | ranges::to<std::vector>();
-    if (introspectImpl.empty()) {
+    auto findFunctionTemplate = [&oi_namespaces](llvm::StringRef name) {
+      return oi_namespaces |
+             ranges::views::for_each([](auto* ns) { return ns->decls(); }) |
+             ranges::views::transform([](auto* p) {
+               return llvm::dyn_cast<clang::FunctionTemplateDecl>(p);
+             }) |
+             ranges::views::filter([name](auto* td) {
+               return td != nullptr && td->getName() == name;
+             }) |
+             ranges::views::take(1) | ranges::to<std::vector>();
+    };
+
+    auto introspectImplTemplate = findFunctionTemplate("introspectImpl");
+    auto reconstructImplTemplate = findFunctionTemplate("reconstructImpl");
+    if (introspectImplTemplate.empty() && reconstructImplTemplate.empty()) {
       LOG(WARNING)
-          << "Failed to find `oi::introspect` within the `oi` namespace. Did "
-             "you compile with `OIL_AOT_COMPILATION=1`?";
+          << "Failed to find `oi::introspect` or `oi::reconstruct` within "
+             "the `oi` namespace. Did you compile with "
+             "`OIL_AOT_COMPILATION=1`?";
       return;
     }
-
-    auto nameToClangTypeMap =
-        introspectImpl | ranges::views::for_each([](auto* td) {
-          return td->specializations();
-        }) |
-        ranges::views::transform(
-            [](auto* p) { return llvm::dyn_cast<clang::FunctionDecl>(p); }) |
-        ranges::views::filter([](auto* p) { return p != nullptr; }) |
-        ranges::views::transform(
-            [](auto* fd) -> std::pair<std::string, const clang::Type*> {
-              clang::ASTContext& Ctx = fd->getASTContext();
-              clang::ASTNameGenerator ASTNameGen(Ctx);
-              std::string name = ASTNameGen.getName(fd);
-
-              assert(fd->getNumParams() == 1);
-              const clang::Type* type =
-                  fd->parameters()[0]->getType().getTypePtr();
-              return {name, type};
-            }) |
-        ranges::to<std::unordered_map>();
-    if (nameToClangTypeMap.empty())
-      return;
 
     type_graph::ClangTypeParserOptions opts;
     opts.typesToStub = ctx.typesToStub;
     opts.mustProcessTemplateParams = ctx.mustProcessTemplateParams;
     opts.chaseRawPointers = ctx.chaseRawPointers;
-
     type_graph::ClangTypeParser parser{ctx.typeGraph, ctx.containerInfos, opts};
-
     auto& Sema = *ctx.sema;
-    auto els = nameToClangTypeMap |
-               ranges::views::transform(
-                   [&parser, &Context, &Sema](
-                       auto& p) -> std::pair<std::string, type_graph::Type*> {
-                     return {p.first, &parser.parse(Context, Sema, *p.second)};
-                   });
-    ctx.nameToTypeMap.insert(els.begin(), els.end());
+
+    if (!introspectImplTemplate.empty()) {
+      auto nameToClangTypeMap =
+          introspectImplTemplate | ranges::views::for_each([](auto* td) {
+            return td->specializations();
+          }) |
+          ranges::views::transform(
+              [](auto* p) { return llvm::dyn_cast<clang::FunctionDecl>(p); }) |
+          ranges::views::filter([](auto* p) { return p != nullptr; }) |
+          ranges::views::transform(
+              [](auto* fd) -> std::pair<std::string, const clang::Type*> {
+                clang::ASTContext& Ctx = fd->getASTContext();
+                clang::ASTNameGenerator ASTNameGen(Ctx);
+                std::string name = ASTNameGen.getName(fd);
+
+                assert(fd->getNumParams() == 1);
+                const clang::Type* type =
+                    fd->parameters()[0]->getType().getTypePtr();
+                return {name, type};
+              }) |
+          ranges::to<std::unordered_map>();
+
+      auto els =
+          nameToClangTypeMap |
+          ranges::views::transform(
+              [&parser, &Context, &Sema](
+                  auto& p) -> std::pair<std::string, type_graph::Type*> {
+                return {p.first, &parser.parse(Context, Sema, *p.second)};
+              });
+      ctx.nameToTypeMap.insert(els.begin(), els.end());
+    }
+
+    if (!reconstructImplTemplate.empty()) {
+      auto nameToClangTypeMap =
+          reconstructImplTemplate | ranges::views::for_each([](auto* td) {
+            return td->specializations();
+          }) |
+          ranges::views::transform(
+              [](auto* p) { return llvm::dyn_cast<clang::FunctionDecl>(p); }) |
+          ranges::views::filter([](auto* p) { return p != nullptr; }) |
+          ranges::views::transform(
+              [](auto* fd) -> std::pair<std::string, const clang::Type*> {
+                clang::ASTContext& Ctx = fd->getASTContext();
+                clang::ASTNameGenerator ASTNameGen(Ctx);
+                std::string name = ASTNameGen.getName(fd);
+
+                // reconstructImpl<T>(std::span<const uint8_t>) - T comes
+                // from the template argument, unlike introspectImpl<T>
+                // above where T is the (unrelated) parameter type.
+                const auto* templateArgs =
+                    fd->getTemplateSpecializationArgs();
+                assert(templateArgs && templateArgs->size() == 1);
+                const clang::Type* type =
+                    templateArgs->get(0).getAsType().getTypePtr();
+                return {name, type};
+              }) |
+          ranges::to<std::unordered_map>();
+
+      auto els =
+          nameToClangTypeMap |
+          ranges::views::transform(
+              [&parser, &Context, &Sema](
+                  auto& p) -> std::pair<std::string, type_graph::Type*> {
+                return {p.first, &parser.parse(Context, Sema, *p.second)};
+              });
+      ctx.nameToReconstructTypeMap.insert(els.begin(), els.end());
+    }
 
     for (const auto& [name, type] : ctx.nameToTypeMap)
+      ctx.typeGraph.addRoot(*type);
+    for (const auto& [name, type] : ctx.nameToReconstructTypeMap)
       ctx.typeGraph.addRoot(*type);
   }
 };

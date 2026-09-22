@@ -1350,4 +1350,65 @@ void CodeGen::generate(TypeGraph& typeGraph,
   }
 }
 
+void CodeGen::generateReconstruct(TypeGraph& typeGraph,
+                                  std::string& code,
+                                  RootFunctionName rootName) {
+  code.clear();
+
+  assert(typeGraph.rootTypes().size() == 1);
+  Type& rootType = typeGraph.rootTypes()[0];
+
+  auto* primitive = dynamic_cast<Primitive*>(&rootType);
+  if (!primitive) {
+    throw std::runtime_error(
+        "CodeGen::generateReconstruct: only scalar root types are "
+        "currently supported (see "
+        "docs/object-capture-initial-thoughts.md - this is the first, "
+        "smallest slice of the reconstruction scaffold, not yet "
+        "generalized to classes/containers)");
+  }
+
+  // Same preamble generate() emits (see OITraceCode.cpp): among other
+  // things, it works around newer glibc's __malloc__ attribute syntax that
+  // this clang version doesn't parse, which the synthetic ParsedData.h/dy.h
+  // headers below would otherwise hit via their own <cstdlib> include.
+  addPreprocessorDefines(config_, code);
+  code += headers::oi_OITraceCode_cpp;
+
+  code += "#include <oi/exporters/ParsedData.h>\n";
+  code += "#include <oi/types/dy.h>\n";
+  code += "#include <cstdint>\n";
+  code += "#include <span>\n";
+  code += "#include <vector>\n\n";
+
+  const auto& typeToHash = std::visit(
+      [](const auto& v) -> const std::string& {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<ExactName, T> ||
+                      std::is_same_v<HashedComponent, T>) {
+          return v.name;
+        } else {
+          static_assert(always_false_v<T>, "missing visit");
+        }
+      },
+      rootName);
+
+  const std::string& typeName = rootType.name();
+
+  code += "extern \"C\" " + typeName + " " + typeToHash +
+          "(std::span<const uint8_t> bytes) {\n";
+  code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
+  code += "  auto it = vec.cbegin();\n";
+  code += "  oi::types::dy::Bytes shape{sizeof(" + typeName + ")};\n";
+  code += "  auto parsed = oi::exporters::ParsedData::parse(it, shape);\n";
+  code += "  return oi::exporters::reconstructScalar<" + typeName +
+          ">(std::get<oi::exporters::ParsedData::Bytes>(parsed.val));\n";
+  code += "}\n";
+
+  if (VLOG_IS_ON(3)) {
+    VLOG(3) << "Generated reconstruct code:\n";
+    std::cerr << code;
+  }
+}
+
 }  // namespace oi::detail
