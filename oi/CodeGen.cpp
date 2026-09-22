@@ -1383,8 +1383,14 @@ std::string resolveTypeName(Type& t) {
       throw std::runtime_error("CodeGen::resolveTypeName: " +
                                cont->containerInfo_.typeName +
                                " has no template parameters");
-    return cont->containerInfo_.typeName + "<" +
-           resolveTypeName(cont->templateParams[0].type()) + ">";
+    std::string name = cont->containerInfo_.typeName + "<" +
+                       resolveTypeName(cont->templateParams[0].type());
+    // A second template parameter (e.g. a map's value type) is named too,
+    // when present - a single-param name like "std::map<K>" wouldn't even
+    // be a valid type.
+    if (cont->templateParams.size() >= 2)
+      name += ", " + resolveTypeName(cont->templateParams[1].type());
+    return name + ">";
   }
 
   throw std::runtime_error(
@@ -1693,17 +1699,25 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
         " has no `codegen.reconstruct` defined - not yet reconstructable");
   }
   if (info.codegen.reconstructKind != "list" &&
-      info.codegen.reconstructKind != "bytes") {
+      info.codegen.reconstructKind != "bytes" &&
+      info.codegen.reconstructKind != "map") {
     throw std::runtime_error(
         "CodeGen::emitReconstructValue: " + info.typeName +
         " has `codegen.reconstruct` but an unrecognized or missing "
         "`codegen.reconstruct_kind` ('" + info.codegen.reconstructKind +
-        "') - expected \"list\" or \"bytes\"");
+        "') - expected \"list\", \"bytes\", or \"map\"");
   }
   if (cont->templateParams.empty()) {
     throw std::runtime_error(
         "CodeGen::emitReconstructValue: " + info.typeName +
         " has no template parameters to reconstruct an element type from");
+  }
+  if (info.codegen.reconstructKind == "map" &&
+      cont->templateParams.size() < 2) {
+    throw std::runtime_error(
+        "CodeGen::emitReconstructValue: " + info.typeName +
+        " is \"map\"-kind but has fewer than 2 template parameters to "
+        "reconstruct a key and a value type from");
   }
 
   const auto& processors = info.codegen.processors;
@@ -1763,6 +1777,33 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     code += nextElemCode;
     code += "    return " + nextElemExpr + ";\n";
     code += "  };\n";
+  } else if (info.codegen.reconstructKind == "map") {
+    // A map's content processor is a List of (key, value) Pairs (see
+    // std_map_type.toml) - one level of structure beyond "list"-kind's
+    // bare element list, so nextEntry() has to peel off that Pair itself
+    // (not something emitReconstructValue's generic Type-based recursion
+    // handles - a wire-level Pair isn't a reconstructable C++ type on its
+    // own) before recursing for the key and the value individually.
+    code += "  auto " + v + "_list = std::get<oi::exporters::ParsedData::"
+            "List>(" + lastVal + ".val);\n";
+    code += "  size_t length = " + v + "_list.length;\n";
+
+    std::string keyCode, valueCode;
+    std::string keyExpr = emitReconstructValue(
+        cont->templateParams[0].type(), v + "_entry.first()", idCounter,
+        keyCode);
+    std::string valueExpr = emitReconstructValue(
+        cont->templateParams[1].type(), v + "_entry.second()", idCounter,
+        valueCode);
+    code += "  auto nextEntry = [&]() {\n";
+    code += "    auto " + v +
+            "_entry = std::get<oi::exporters::ParsedData::Pair>(" + v +
+            "_list.values().val);\n";
+    code += keyCode;
+    code += valueCode;
+    code += "    return std::make_pair(" + keyExpr + ", " + valueExpr +
+            ");\n";
+    code += "  };\n";
   } else {
     // "bytes": the whole reconstructable content is one contiguous
     // captured byte blob (e.g. a string's characters), not a per-element
@@ -1774,14 +1815,19 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
   const std::string resultVar = v + "_result";
   code += "  auto " + resultVar + " = [&]() -> " + resolveTypeName(*cont) +
           " {\n";
-  // T0 must mean *this* container's own element type inside its own
-  // reconstruct body - shadowing whatever T0 an enclosing level (if any)
-  // already declared. Without this, a nested container's reconstruct body
-  // (e.g. a vector<string>'s element string) would incorrectly see the
-  // outermost container's T0 instead of its own, since bare `T0` is
-  // otherwise just an unqualified name looked up in the enclosing scope.
+  // T0 (and T1, for a "map"-kind container) must mean *this* container's
+  // own template parameters inside its own reconstruct body - shadowing
+  // whatever an enclosing level (if any) already declared. Without this,
+  // a nested container's reconstruct body (e.g. a vector<string>'s
+  // element string) would incorrectly see the outermost container's T0
+  // instead of its own, since bare `T0`/`T1` are otherwise just
+  // unqualified names looked up in the enclosing scope.
   code += "    using T0 = " +
           resolveTypeName(cont->templateParams[0].type()) + ";\n";
+  if (cont->templateParams.size() >= 2) {
+    code += "    using T1 = " +
+            resolveTypeName(cont->templateParams[1].type()) + ";\n";
+  }
   code += (boost::format(info.codegen.reconstruct) % info.typeName).str();
   code += "\n  }();\n";
 
@@ -1832,12 +1878,18 @@ void CodeGen::generateReconstructContainerBody(Container& container,
   code += "  using DB = int;\n";
   code += "  struct OIReconstructFakeCtx { using DataBuffer = DB; };\n";
   code += "  using Ctx = OIReconstructFakeCtx;\n";
-  // T0 is the outermost container's own element type - needed as a bare
-  // name for its processor type strings (e.g. seq_type.toml's
-  // `typename TypeHandler<Ctx, T0>::type`) to resolve; a nested element's
-  // own T0 (if it's itself a container) is handled the same way, but as a
-  // local inside emitReconstructValue's own lambda scope, not here.
+  // T0 (and T1, for a map) is the outermost container's own template
+  // parameter(s) - needed as bare names for its processor type strings
+  // (e.g. seq_type.toml's `typename TypeHandler<Ctx, T0>::type`, or
+  // std_map_type.toml's ...<Ctx, T0>/...<Ctx, T1>) to resolve; a nested
+  // element's own T0/T1 (if it's itself a container) is handled the same
+  // way, but as a local inside emitReconstructValue's own lambda scope,
+  // not here.
   code += "  using T0 = " + t0Name + ";\n";
+  if (container.templateParams.size() >= 2) {
+    code += "  using T1 = " +
+            resolveTypeName(container.templateParams[1].type()) + ";\n";
+  }
   // TypeHandler and oi_capture_bytes are always emitted inside
   // namespace OIInternal { namespace {...} } - both by generate() (the
   // combined case) and by generateReconstruct() itself (the standalone
@@ -1845,6 +1897,24 @@ void CodeGen::generateReconstructContainerBody(Container& container,
   // same way) specifically so these lines resolve identically either way.
   code += "  using OIInternal::TypeHandler;\n";
   code += "  using OIInternal::oi_capture_bytes;\n";
+  // A map-shaped container's processor type is
+  // std::conditional_t<captureKeys, <uses CaptureKeyHandler>, <doesn't>>
+  // (see std_map_type.toml) - std::conditional_t requires *both* branches
+  // to name-resolve regardless of which one captureKeys actually selects
+  // (unlike `if constexpr`, it doesn't discard the unused branch from
+  // lookup), so CaptureKeyHandler has to be reachable here even though
+  // captureKeys is always false in practice for reconstruction.
+  code += "  using OIInternal::CaptureKeyHandler;\n";
+  // A map-shaped container's content processor is conditioned on
+  // captureKeys (see std_map_type.toml) - a member of that container's
+  // own TypeHandler specialization normally, invisible here since
+  // shapeType (below) reuses the processor text outside that class body.
+  // Reconstruction never enables key capture, so this is always false in
+  // practice, but reads the real field rather than hard-coding that.
+  code += "  constexpr bool captureKeys = " +
+          std::string(container.containerInfo_.captureKeys ? "true"
+                                                            : "false") +
+          ";\n";
   code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
   code += "  auto it = vec.cbegin();\n";
 

@@ -50,7 +50,8 @@ struct ContainerInfo {
      * (below), which selects which names this body has in scope.
      *
      * %1% substitutes to the container's own bare name exactly as decl/func
-     * already do, so `%1%<T0>` names the concrete container type.
+     * already do, so `%1%<T0>` (or `%1%<T0, T1>` for a "map"-kind
+     * container) names the concrete container type.
      */
     std::string reconstruct = "";
     /*
@@ -68,8 +69,9 @@ struct ContainerInfo {
      *   `contentBytes` (a std::vector<uint8_t> of the captured bytes) is in
      *   scope.
      *
-     * A map-shaped container (key+value per entry) would need a third,
-     * currently unimplemented convention - not attempted yet.
+     *   "map" - a homogeneous key/value container (e.g. std::map).
+     *   `length` and `nextEntry()` (decodes and returns the next entry as
+     *   a std::pair<T0, T1> - key first, value second) are in scope.
      */
     std::string reconstructKind = "";
     std::vector<Processor> processors{};
