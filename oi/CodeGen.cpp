@@ -1350,6 +1350,167 @@ void CodeGen::generate(TypeGraph& typeGraph,
   }
 }
 
+namespace {
+
+// Unwraps Typedefs to find the underlying Primitive a member's type
+// resolves to, or nullptr if it never bottoms out at one - the current
+// reconstruction scaffold only knows how to rebuild plain scalar members
+// (see CodeGen::generateReconstructClass).
+const Primitive* resolvePrimitiveMember(const Member& m) {
+  const Type* t = &m.type();
+  while (const auto* td = dynamic_cast<const Typedef*>(t)) {
+    t = &td->underlyingType();
+  }
+  return dynamic_cast<const Primitive*>(t);
+}
+
+struct ReconstructableMember {
+  std::string_view name;
+  std::string typeName;
+};
+
+}  // namespace
+
+void CodeGen::generateReconstructScalar(Primitive& primitive,
+                                        const std::string& typeToHash,
+                                        std::string& code) {
+  const std::string& typeName = primitive.name();
+
+  code += "extern \"C\" " + typeName + " " + typeToHash +
+          "(std::span<const uint8_t> bytes) {\n";
+  code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
+  code += "  auto it = vec.cbegin();\n";
+  code += "  oi::types::dy::Bytes shape{sizeof(" + typeName + ")};\n";
+  code += "  auto parsed = oi::exporters::ParsedData::parse(it, shape);\n";
+  code += "  return oi::exporters::reconstructScalar<" + typeName +
+          ">(std::get<oi::exporters::ParsedData::Bytes>(parsed.val));\n";
+  code += "}\n";
+}
+
+// The class/struct slice of the reconstruction scaffold: raw byte replay
+// for a flat struct of scalar members, no pointer fixup or nested
+// class/container members yet (see
+// docs/object-capture-initial-thoughts.md). Mirrors genClassStaticType's
+// wire shape - a right-nested chain of types::st::Pair<leaf, ...> - but
+// built from the runtime types::dy:: descriptors instead, since this code
+// has to decode a shape it didn't just statically encode.
+void CodeGen::generateReconstructClass(TypeGraph& typeGraph,
+                                       Class& cls,
+                                       const std::string& typeToHash,
+                                       std::string& code) {
+  size_t lastNonPaddingElement = getLastNonPaddingMemberIndex(cls.members);
+  if (lastNonPaddingElement == (size_t)-1) {
+    throw std::runtime_error(
+        "CodeGen::generateReconstructClass: " + cls.name() +
+        " has no non-padding members - not yet supported");
+  }
+
+  std::vector<ReconstructableMember> members;
+  for (size_t i = 0; i < lastNonPaddingElement + 1; i++) {
+    const auto& member = cls.members[i];
+    if (member.name.starts_with(AddPadding::MemberPrefix))
+      continue;
+
+    const Primitive* primitiveType = resolvePrimitiveMember(member);
+    if (!primitiveType) {
+      throw std::runtime_error(
+          "CodeGen::generateReconstructClass: member " + cls.name() + "::" +
+          member.name +
+          " is not a scalar - only flat structs of scalar members are "
+          "currently supported (see "
+          "docs/object-capture-initial-thoughts.md - class/container "
+          "members and pointer fixup are not yet implemented)");
+    }
+
+    // Deliberately the resolved Primitive's own canonical name (e.g.
+    // "uint32_t"), not member.type().name() - the member's *declared*
+    // type is frequently a Typedef (std::uint32_t -> uint32_t -> ...),
+    // and those typedef names only exist inside OIInternal's anonymous
+    // namespace below (same as genDefs() emits for generate()'s own use),
+    // unreachable from the free functions this generates. A Primitive's
+    // name is always a globally-resolvable spelling already covered by
+    // this file's #include <cstdint> (see Types.cpp's Primitive::getName),
+    // so it sidesteps the qualification question entirely.
+    members.push_back({.name = member.name, .typeName = primitiveType->name()});
+  }
+  size_t n = members.size();
+
+  // Re-declare the struct exactly as the write side does (see generate()) -
+  // internal-linkage, but layout-identical to the real type, which is all
+  // the extern "C" function below needs: the C++ ABI for returning it by
+  // value depends on size/alignment/triviality, not nominal type identity.
+  code += "namespace OIInternal {\nnamespace {\n";
+  defineInternalTypes(code);  // OIArray<>, used by padding members below
+  genDecls(typeGraph, code);
+  genDefs(typeGraph, code);
+  code += "using __ROOT_TYPE__ = " + cls.name() + ";\n";
+  code += "} // namespace\n} // namespace OIInternal\n";
+
+  for (size_t i = 0; i < n; i++) {
+    code += "static constexpr oi::types::dy::Bytes leaf_" + std::to_string(i) +
+            "{sizeof(" + members[i].typeName + ")};\n";
+  }
+  if (n > 1) {
+    for (size_t i = n - 1; i-- > 0;) {
+      std::string rhs = (i == n - 2) ? "leaf_" + std::to_string(n - 1)
+                                     : "pair_" + std::to_string(i + 1);
+      code += "static constexpr oi::types::dy::Pair pair_" + std::to_string(i) +
+              "{leaf_" + std::to_string(i) + ", " + rhs + "};\n";
+    }
+  }
+  const std::string shapeVar = (n == 1) ? "leaf_0" : "pair_0";
+
+  code += "extern \"C\" OIInternal::__ROOT_TYPE__ " + typeToHash +
+          "(std::span<const uint8_t> bytes) {\n";
+  code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
+  code += "  auto it = vec.cbegin();\n";
+  code += "  auto parsed = oi::exporters::ParsedData::parse(it, " + shapeVar +
+          ");\n";
+
+  if (n == 1) {
+    code += "  auto field_0 = oi::exporters::reconstructScalar<" +
+            members[0].typeName +
+            ">(std::get<oi::exporters::ParsedData::Bytes>(parsed.val));\n";
+  } else {
+    // ParsedData::Pair holds Lazy fields, which hold a reference member -
+    // that deletes Pair's copy *assignment* (though not construction), so
+    // each nesting level gets its own freshly-initialized, uniquely-named
+    // variable below rather than reusing/reassigning one. first() must be
+    // called before second() at each level - both share the same
+    // underlying iterator, so second() would parse from the wrong offset
+    // if evaluated first.
+    code += "  auto pair_0 = std::get<oi::exporters::ParsedData::Pair>(parsed."
+            "val);\n";
+    for (size_t i = 0; i < n - 1; i++) {
+      code += "  auto field_" + std::to_string(i) +
+              " = oi::exporters::reconstructScalar<" + members[i].typeName +
+              ">(std::get<oi::exporters::ParsedData::Bytes>(pair_" +
+              std::to_string(i) + ".first().val));\n";
+      if (i == n - 2) {
+        code += "  auto field_" + std::to_string(i + 1) +
+                " = oi::exporters::reconstructScalar<" +
+                members[i + 1].typeName +
+                ">(std::get<oi::exporters::ParsedData::Bytes>(pair_" +
+                std::to_string(i) + ".second().val));\n";
+      } else {
+        code += "  auto next_" + std::to_string(i) + " = pair_" +
+                std::to_string(i) + ".second();\n";
+        code += "  auto pair_" + std::to_string(i + 1) +
+                " = std::get<oi::exporters::ParsedData::Pair>(next_" +
+                std::to_string(i) + ".val);\n";
+      }
+    }
+  }
+
+  code += "  return OIInternal::__ROOT_TYPE__{\n";
+  for (size_t i = 0; i < n; i++) {
+    code += "    ." + std::string(members[i].name) + " = field_" +
+            std::to_string(i) + ",\n";
+  }
+  code += "  };\n";
+  code += "}\n";
+}
+
 void CodeGen::generateReconstruct(TypeGraph& typeGraph,
                                   std::string& code,
                                   RootFunctionName rootName) {
@@ -1359,13 +1520,13 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
   Type& rootType = typeGraph.rootTypes()[0];
 
   auto* primitive = dynamic_cast<Primitive*>(&rootType);
-  if (!primitive) {
+  auto* cls = dynamic_cast<Class*>(&rootType);
+  if (!primitive && !cls) {
     throw std::runtime_error(
-        "CodeGen::generateReconstruct: only scalar root types are "
-        "currently supported (see "
-        "docs/object-capture-initial-thoughts.md - this is the first, "
-        "smallest slice of the reconstruction scaffold, not yet "
-        "generalized to classes/containers)");
+        "CodeGen::generateReconstruct: only scalar and flat-struct root "
+        "types are currently supported (see "
+        "docs/object-capture-initial-thoughts.md - containers and pointer "
+        "fixup are not yet implemented)");
   }
 
   // Same preamble generate() emits (see OITraceCode.cpp): among other
@@ -1393,17 +1554,11 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
       },
       rootName);
 
-  const std::string& typeName = rootType.name();
-
-  code += "extern \"C\" " + typeName + " " + typeToHash +
-          "(std::span<const uint8_t> bytes) {\n";
-  code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
-  code += "  auto it = vec.cbegin();\n";
-  code += "  oi::types::dy::Bytes shape{sizeof(" + typeName + ")};\n";
-  code += "  auto parsed = oi::exporters::ParsedData::parse(it, shape);\n";
-  code += "  return oi::exporters::reconstructScalar<" + typeName +
-          ">(std::get<oi::exporters::ParsedData::Bytes>(parsed.val));\n";
-  code += "}\n";
+  if (primitive) {
+    generateReconstructScalar(*primitive, typeToHash, code);
+  } else {
+    generateReconstructClass(typeGraph, *cls, typeToHash, code);
+  }
 
   if (VLOG_IS_ON(3)) {
     VLOG(3) << "Generated reconstruct code:\n";
