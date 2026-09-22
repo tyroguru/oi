@@ -43,21 +43,35 @@ struct ContainerInfo {
      * Research groundwork for byte-accurate object capture/reconstruction
      * (see docs/object-capture-initial-thoughts.md, not part of this repo) -
      * a C++ function body assembling one instance of this container from
-     * already-reconstructed elements, the read-side counterpart to
+     * already-reconstructed content, the read-side counterpart to
      * traversalFunc. Empty (the default) means this container isn't
      * reconstructable yet - reconstructing a root of this type throws a
-     * clear error rather than guessing.
+     * clear error rather than guessing. Always paired with reconstructKind
+     * (below), which selects which names this body has in scope.
      *
-     * Calling convention (only shape currently supported: a homogeneous
-     * single-element container - sequences, sets): %1% substitutes to the
-     * container's own bare name exactly as decl/func already do (so `%1%<T0>`
-     * names the concrete container type); `length` (the decoded element
-     * count) and `nextElement()` (decodes and returns the next element, of
-     * type T0) are in scope. A map-shaped container (key+value per entry)
-     * would need a second, currently unimplemented convention - not
-     * attempted yet.
+     * %1% substitutes to the container's own bare name exactly as decl/func
+     * already do, so `%1%<T0>` names the concrete container type.
      */
     std::string reconstruct = "";
+    /*
+     * Which calling convention `reconstruct` (above) was written against -
+     * required whenever `reconstruct` is set, since the wire shape (and so
+     * what can be decoded ahead of time versus what `reconstruct` must
+     * assemble itself) differs by container kind:
+     *
+     *   "list" - a homogeneous single-element container (sequences, sets).
+     *   `length` (the decoded element count) and `nextElement()` (decodes
+     *   and returns the next element, of type T0) are in scope.
+     *
+     *   "bytes" - a container whose entire reconstructable content is one
+     *   contiguous captured byte blob (e.g. a string's characters).
+     *   `contentBytes` (a std::vector<uint8_t> of the captured bytes) is in
+     *   scope.
+     *
+     * A map-shaped container (key+value per entry) would need a third,
+     * currently unimplemented convention - not attempted yet.
+     */
+    std::string reconstructKind = "";
     std::vector<Processor> processors{};
   };
 

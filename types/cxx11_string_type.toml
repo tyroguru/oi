@@ -79,6 +79,19 @@ traversal_func = """
             container.size() * sizeof(T0)));
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# calling convention. A string's whole reconstructable content is the one
+# contiguous captured byte blob above (the "bytes" convention), not a
+# per-element list - constructing directly from (pointer, count) handles
+# embedded nulls correctly, unlike relying on null termination.
+reconstruct_kind = "bytes"
+reconstruct = """
+return %1%<T0>(reinterpret_cast<const T0*>(contentBytes.data()),
+              contentBytes.size() / sizeof(T0));
+"""
+
 # We could no doubt do this with some more compact typing with Pairs but
 # I'm experimenting with different styles - this one being a more readable
 # yet verbose container specification. Simple sequential VarInt's. I may

@@ -1542,10 +1542,11 @@ void CodeGen::generateReconstructClassBody(Class& cls,
   code += "}\n";
 }
 
-// The container slice of the reconstruction scaffold: a single-element-kind
-// container (sequence or set - not yet map, which needs a second, key+value
-// calling convention - see ContainerInfo.h's `reconstruct` field doc) whose
-// element type is a scalar. Assumes TypeHandler<Ctx, T0> (from
+// The container slice of the reconstruction scaffold: a "list"-kind
+// container (sequence or set) or a "bytes"-kind one (e.g. a string) - not
+// yet a map, which needs a third, key+value calling convention - see
+// ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs. Element
+// type must be a scalar. Assumes TypeHandler<Ctx, T0> (from
 // FuncGen::DefineBasicTypeHandlers) and DEFINE_DESCRIBE-enabled
 // oi/types/st.h are already available - either generate() already emitted
 // them (the combined case) or the caller emits them itself first (the
@@ -1563,6 +1564,14 @@ void CodeGen::generateReconstructContainerBody(Container& container,
         "CodeGen::generateReconstructContainerBody: " + info.typeName +
         " has no `codegen.reconstruct` defined - not yet reconstructable");
   }
+  if (info.codegen.reconstructKind != "list" &&
+      info.codegen.reconstructKind != "bytes") {
+    throw std::runtime_error(
+        "CodeGen::generateReconstructContainerBody: " + info.typeName +
+        " has `codegen.reconstruct` but an unrecognized or missing "
+        "`codegen.reconstruct_kind` ('" + info.codegen.reconstructKind +
+        "') - expected \"list\" or \"bytes\"");
+  }
   if (container.templateParams.empty()) {
     throw std::runtime_error(
         "CodeGen::generateReconstructContainerBody: " + info.typeName +
@@ -1577,6 +1586,20 @@ void CodeGen::generateReconstructContainerBody(Container& container,
         "are currently supported (see "
         "docs/object-capture-initial-thoughts.md)");
   }
+  // NOTE, a known, verified-but-not-guaranteed limitation: Primitive::Kind
+  // has no separate case for `char` - it's classified as Kind::Int8
+  // alongside `signed char`/`int8_t`, so t0Name below is always "int8_t"
+  // for a char-element container, never "char". For std::string that means
+  // the return type this function declares is std::basic_string<int8_t>,
+  // not std::basic_string<char> - a nominally different type. This is safe
+  // only because (a) the mangled symbol name the linker actually binds on
+  // comes from the caller's real AST via typeToHash, not from any C++ text
+  // this function writes, and (b) libstdc++'s basic_string<CharT> layout
+  // depends only on sizeof(CharT), not CharT's identity - verified
+  // empirically (see docs/object-capture-initial-thoughts.md), not
+  // guaranteed by the standard. Fixing this properly means giving
+  // Primitive::Kind a distinct case for char, a broader type-graph change
+  // out of scope here.
   const std::string& t0Name = elementType->name();
 
   const auto& processors = info.codegen.processors;
@@ -1610,13 +1633,16 @@ void CodeGen::generateReconstructContainerBody(Container& container,
   code += "  struct OIReconstructFakeCtx { using DataBuffer = DB; };\n";
   code += "  using Ctx = OIReconstructFakeCtx;\n";
   code += "  using T0 = " + t0Name + ";\n";
-  // TypeHandler is always emitted inside namespace OIInternal { namespace
-  // {...} } - both by generate() (the combined case) and by
-  // generateReconstruct() itself (the standalone case, which wraps its own
-  // FuncGen::DefineBasicTypeHandlers call the same way specifically so this
-  // line resolves identically either way. The processor type strings below
-  // reference the unqualified name.
+  // TypeHandler and oi_capture_bytes are always emitted inside
+  // namespace OIInternal { namespace {...} } - both by generate() (the
+  // combined case) and by generateReconstruct() itself (the standalone
+  // case, which wraps its own FuncGen::DefineBasicTypeHandlers call the
+  // same way) specifically so these lines resolve identically either way.
+  // The processor type strings below reference both unqualified (a
+  // "bytes"-kind container's content processor is typically
+  // std::conditional_t<oi_capture_bytes, DynBytes<DB>, Unit<DB>>).
   code += "  using OIInternal::TypeHandler;\n";
+  code += "  using OIInternal::oi_capture_bytes;\n";
   code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
   code += "  auto it = vec.cbegin();\n";
   code += "  auto parsed = oi::exporters::ParsedData::parse(it, " +
@@ -1655,14 +1681,24 @@ void CodeGen::generateReconstructContainerBody(Container& container,
     }
   }
 
-  code +=
-      "  auto list = std::get<oi::exporters::ParsedData::List>(lastVal."
-      "val);\n";
-  code += "  size_t length = list.length;\n";
-  code +=
-      "  auto nextElement = [&list]() { return "
-      "oi::exporters::reconstructScalar<T0>(std::get<oi::exporters::"
-      "ParsedData::Bytes>(list.values().val)); };\n";
+  if (info.codegen.reconstructKind == "list") {
+    code +=
+        "  auto list = std::get<oi::exporters::ParsedData::List>(lastVal."
+        "val);\n";
+    code += "  size_t length = list.length;\n";
+    code +=
+        "  auto nextElement = [&list]() { return "
+        "oi::exporters::reconstructScalar<T0>(std::get<oi::exporters::"
+        "ParsedData::Bytes>(list.values().val)); };\n";
+  } else {
+    // "bytes": the whole reconstructable content is one contiguous
+    // captured byte blob (e.g. a string's characters), not a per-element
+    // list - nothing left to decode, just hand the raw bytes over.
+    code +=
+        "  auto contentBytes = "
+        "std::get<oi::exporters::ParsedData::DynBytes>(lastVal.val).value;"
+        "\n";
+  }
 
   code += (boost::format(info.codegen.reconstruct) % info.typeName).str();
   code += "}\n";

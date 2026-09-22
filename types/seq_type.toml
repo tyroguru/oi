@@ -81,7 +81,9 @@ return tail.finish();
 
 # Research groundwork for byte-accurate object capture/reconstruction (see
 # docs/object-capture-initial-thoughts.md, not part of this repo) - see
-# ContainerInfo.h's `reconstruct` field doc for the calling convention.
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# calling convention.
+reconstruct_kind = "list"
 reconstruct = """
 %1%<T0> result;
 result.reserve(length);
