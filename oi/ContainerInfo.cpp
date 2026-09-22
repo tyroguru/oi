@@ -328,6 +328,10 @@ ContainerInfo::ContainerInfo(const fs::path& path) {
     codegen.traversalFunc = std::move(*str);
   }
   if (std::optional<std::string> str =
+          codegenToml["reconstruct"].value<std::string>()) {
+    codegen.reconstruct = std::move(*str);
+  }
+  if (std::optional<std::string> str =
           codegenToml["extra"].value<std::string>()) {
     codegen.extra = std::move(*str);
   }

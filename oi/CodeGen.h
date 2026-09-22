@@ -35,6 +35,7 @@ class SymbolService;
 }
 namespace oi::detail::type_graph {
 class Class;
+class Container;
 class Member;
 class PassManager;
 class Primitive;
@@ -126,6 +127,9 @@ class CodeGen {
   void generateReconstructClassBody(type_graph::Class& cls,
                                     const std::string& typeToHash,
                                     std::string& code);
+  void generateReconstructContainerBody(type_graph::Container& container,
+                                        const std::string& typeToHash,
+                                        std::string& code);
 
   type_graph::TypeGraph typeGraph_;
   const OICodeGenConfig& config_;

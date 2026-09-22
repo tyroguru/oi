@@ -39,6 +39,25 @@ struct ContainerInfo {
     std::string traversalFunc = "";
     std::string extra = "";
     std::string scopedExtra = "";
+    /*
+     * Research groundwork for byte-accurate object capture/reconstruction
+     * (see docs/object-capture-initial-thoughts.md, not part of this repo) -
+     * a C++ function body assembling one instance of this container from
+     * already-reconstructed elements, the read-side counterpart to
+     * traversalFunc. Empty (the default) means this container isn't
+     * reconstructable yet - reconstructing a root of this type throws a
+     * clear error rather than guessing.
+     *
+     * Calling convention (only shape currently supported: a homogeneous
+     * single-element container - sequences, sets): %1% substitutes to the
+     * container's own bare name exactly as decl/func already do (so `%1%<T0>`
+     * names the concrete container type); `length` (the decoded element
+     * count) and `nextElement()` (decodes and returns the next element, of
+     * type T0) are in scope. A map-shaped container (key+value per entry)
+     * would need a second, currently unimplemented convention - not
+     * attempted yet.
+     */
+    std::string reconstruct = "";
     std::vector<Processor> processors{};
   };
 

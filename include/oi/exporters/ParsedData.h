@@ -22,6 +22,7 @@
 #include <bit>
 #include <cassert>
 #include <cstdint>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -103,6 +104,42 @@ T reconstructScalar(const ParsedData::Bytes& bytes) {
   std::array<uint8_t, sizeof(T)> arr;
   std::copy(bytes.value.begin(), bytes.value.end(), arr.begin());
   return std::bit_cast<T>(arr);
+}
+
+/*
+ * Fully consumes a ParsedData value's underlying bytes, however deeply
+ * nested, without extracting anything from it - for skipping a field
+ * reconstruction has no use for (e.g. a container's profiler-only
+ * bookkeeping processors - va-intervals, pointer, capacity - ahead of its
+ * actual content; see CodeGen::generateReconstructContainerBody).
+ *
+ * This is needed, and not a no-op, because Pair/List/Sum are Lazy at their
+ * *immediate* children only: obtaining a ParsedData::Pair (say) does not by
+ * itself consume the bytes either of its own fields represent - each field
+ * is only actually parsed (and the shared iterator advanced) when that
+ * field's Lazy is invoked. A compound field that's "skipped" by simply
+ * never invoking it - or invoked only one level deep, leaving *its own*
+ * Pair/List/Sum children un-invoked - leaves those bytes unread, silently
+ * misaligning every read that follows. Scalars (Unit/VarInt/Bytes/DynBytes)
+ * are eagerly consumed by ParsedData::parse itself, so there is nothing
+ * left for this function to do once it reaches one.
+ */
+inline void drainParsedData(const ParsedData& pd) {
+  std::visit(
+      [](auto v) {
+        using V = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<V, ParsedData::Pair>) {
+          drainParsedData(v.first());
+          drainParsedData(v.second());
+        } else if constexpr (std::is_same_v<V, ParsedData::List>) {
+          for (uint64_t i = 0; i < v.length; i++) {
+            drainParsedData(v.values());
+          }
+        } else if constexpr (std::is_same_v<V, ParsedData::Sum>) {
+          drainParsedData(v.value());
+        }
+      },
+      pd.val);
 }
 
 }  // namespace oi::exporters

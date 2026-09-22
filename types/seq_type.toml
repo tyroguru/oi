@@ -79,6 +79,18 @@ for (auto&& it : container) {
 return tail.finish();
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct` field doc for the calling convention.
+reconstruct = """
+%1%<T0> result;
+result.reserve(length);
+for (size_t i = 0; i < length; i++) {
+  result.push_back(nextElement());
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
 func = """
