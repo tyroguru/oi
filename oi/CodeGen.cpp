@@ -1378,6 +1378,20 @@ std::string resolveTypeName(Type& t) {
   if (auto* prim = dynamic_cast<Primitive*>(&resolved))
     return prim->name();
 
+  // Enums are re-declared as flat, independent `enum class Name : uintN_t
+  // {};` types by genDeclsEnum (see genDecls' dispatch) whenever a class
+  // root's own preamble runs genDecls, the same treatment a nested C++
+  // enum (e.g. Product::ProductType::Enum) gets regardless of its
+  // original nesting. Unlike a Primitive's builtin spelling (globally
+  // visible everywhere) or a Container's std::-qualified spelling, this
+  // declaration lands inside `namespace OIInternal { namespace {...} }` -
+  // and the reconstructImpl<T> function body that names this type is
+  // emitted at global scope (see appendReconstructFunctionBody), outside
+  // that namespace - so the name must be qualified to remain resolvable
+  // there.
+  if (auto* en = dynamic_cast<Enum*>(&resolved))
+    return "OIInternal::" + en->name();
+
   if (auto* cont = dynamic_cast<Container*>(&resolved)) {
     if (cont->templateParams.empty())
       throw std::runtime_error("CodeGen::resolveTypeName: " +
@@ -1395,7 +1409,7 @@ std::string resolveTypeName(Type& t) {
 
   throw std::runtime_error(
       "CodeGen::resolveTypeName: " + resolved.name() +
-      " is neither a scalar nor a container - cannot name its "
+      " is neither a scalar, an enum, nor a container - cannot name its "
       "reconstructed type");
 }
 
@@ -1447,13 +1461,14 @@ std::vector<ReconstructableMember> collectReconstructableMembers(
 
     Type& resolved = unwrapTypedefs(member.type());
     if (!dynamic_cast<Primitive*>(&resolved) &&
+        !dynamic_cast<Enum*>(&resolved) &&
         !dynamic_cast<Container*>(&resolved)) {
       throw std::runtime_error(
           "CodeGen::generateReconstructClass: member " + cls.name() + "::" +
           member.name +
-          " is neither a scalar nor a reconstructable container - not yet "
-          "supported (see docs/object-capture-initial-thoughts.md - "
-          "pointer fixup and nested class members are not yet "
+          " is neither a scalar, an enum, nor a reconstructable container "
+          "- not yet supported (see docs/object-capture-initial-thoughts.md "
+          "- pointer fixup and nested class members are not yet "
           "implemented)");
     }
 
@@ -1684,12 +1699,27 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
            ">(std::get<oi::exporters::ParsedData::Bytes>(" + v + "_data.val))";
   }
 
+  if (dynamic_cast<Enum*>(resolved)) {
+    // An enum is trivially copyable and fixed-size, exactly like a
+    // Primitive - the write side's generic TypeHandler primary template
+    // (FuncGen::DefineBasicTypeHandlers) already captures it the same
+    // way (raw bytes via bit_cast), with no enum-specific logic anywhere
+    // in the capture path either. reconstructScalar<T>'s own bit_cast
+    // works identically on an enum type, so this is the same expression
+    // as the Primitive case above, just naming the enum instead - via
+    // resolveTypeName, since (unlike a Primitive's builtin name) an
+    // enum's declaration lives inside namespace OIInternal and needs
+    // that qualification to resolve from this function's global scope.
+    return "oi::exporters::reconstructScalar<" + resolveTypeName(*resolved) +
+           ">(std::get<oi::exporters::ParsedData::Bytes>(" + v + "_data.val))";
+  }
+
   auto* cont = dynamic_cast<Container*>(resolved);
   if (!cont) {
     throw std::runtime_error(
         "CodeGen::emitReconstructValue: " + resolved->name() +
-        " is neither a scalar nor a reconstructable container - not yet "
-        "supported");
+        " is neither a scalar, an enum, nor a reconstructable container - "
+        "not yet supported");
   }
 
   const ContainerInfo& info = cont->containerInfo_;
