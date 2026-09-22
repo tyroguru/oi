@@ -44,18 +44,45 @@ namespace {
 constexpr std::string_view kLocalTransportPath = "/tmp/oi_reconstruct_demo.bytes";
 }  // namespace
 
+// The classic "network union" trick: the same 4 bytes viewed either as one
+// 32-bit value or as 4 individual octets, so an IPv4 address can be built
+// octet-by-octet (or parsed off the wire) and printed in dotted-decimal
+// form without ever needing to know or care which view the surrounding
+// code actually populated - exactly the class of union OI now treats as an
+// opaque, trivially-copyable byte blob (see
+// docs/object-capture-initial-thoughts.md's union section, not part of
+// this repo): capture doesn't need to know it's an IP address, only that
+// it's 4 raw bytes.
+union IPv4Address {
+  std::uint32_t whole;
+  std::uint8_t octets[4];
+};
+
+IPv4Address makeIPv4(std::uint8_t a,
+                     std::uint8_t b,
+                     std::uint8_t c,
+                     std::uint8_t d) {
+  IPv4Address addr{};
+  addr.octets[0] = a;
+  addr.octets[1] = b;
+  addr.octets[2] = c;
+  addr.octets[3] = d;
+  return addr;
+}
+
 // External linkage required: DemoObject is a template argument to the weak
 // introspectImpl<T>/reconstructImpl<T> symbols oilgen fills in below (see
 // include/oi/oi.h) - a type declared in an anonymous namespace has no
 // linkage at all, which Clang correctly rejects.
 //
 // Deliberately covers every member kind reconstruction supports today - a
-// nested-enum member, a scalar, a string, a vector, and a map (including a
-// container-typed map key) - so this one object exercises the full,
-// currently-supported surface. Deliberately does NOT include a nested
-// class/struct member or a pointer member - neither is supported by
-// reconstruction yet (see docs/object-capture-initial-thoughts.md's
-// "explicit ordering for the remaining reconstruction gaps").
+// nested-enum member, a scalar, a string, a vector, a map (including a
+// container-typed map key), and a trivially-copyable union - so this one
+// object exercises the full, currently-supported surface. Deliberately
+// does NOT include a nested class/struct member or a pointer member -
+// neither is supported by reconstruction yet (see
+// docs/object-capture-initial-thoughts.md's "explicit ordering for the
+// remaining reconstruction gaps").
 struct DemoObject {
   struct Status {
     enum Enum { PENDING, ACTIVE, DONE };
@@ -66,6 +93,7 @@ struct DemoObject {
   std::string label;
   std::vector<std::int32_t> scores;
   std::map<std::string, std::int32_t> attributes;
+  IPv4Address address;
 };
 
 const char* statusName(DemoObject::Status::Enum status) {
@@ -104,6 +132,12 @@ void printDemoObject(const DemoObject& object, std::ostream& os) {
     os << key << ": " << value;
   }
   os << "}\n";
+
+  os << "  address = " << static_cast<int>(object.address.octets[0]) << '.'
+     << static_cast<int>(object.address.octets[1]) << '.'
+     << static_cast<int>(object.address.octets[2]) << '.'
+     << static_cast<int>(object.address.octets[3]) << " (same bytes as raw=0x"
+     << std::hex << object.address.whole << std::dec << ")\n";
 }
 
 DemoObject buildDemoObject() {
@@ -113,6 +147,7 @@ DemoObject buildDemoObject() {
       .label = "Hello from the OI byte-accurate reconstruction demo!",
       .scores = {10, 20, 30, 40, 50},
       .attributes = {{"alpha", 1}, {"beta", 2}, {"gamma", 3}},
+      .address = makeIPv4(8, 8, 8, 8),
   };
 }
 
