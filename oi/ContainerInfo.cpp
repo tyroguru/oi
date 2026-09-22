@@ -332,6 +332,10 @@ ContainerInfo::ContainerInfo(const fs::path& path) {
     codegen.reconstruct = std::move(*str);
   }
   if (std::optional<std::string> str =
+          codegenToml["reconstruct_kind"].value<std::string>()) {
+    codegen.reconstructKind = std::move(*str);
+  }
+  if (std::optional<std::string> str =
           codegenToml["extra"].value<std::string>()) {
     codegen.extra = std::move(*str);
   }
