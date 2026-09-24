@@ -70,6 +70,17 @@ IPv4Address makeIPv4(std::uint8_t a,
   return addr;
 }
 
+// A plain nested (non-union) struct member - reconstructed member-by-member
+// via CodeGen::emitReconstructClassValue's recursion, the same way the
+// outer DemoObject itself is. Deliberately not flattened into DemoObject
+// directly, so the demo actually exercises the recursive case rather than
+// just a flat struct of scalars.
+struct Version {
+  std::int32_t major;
+  std::int32_t minor;
+  std::int32_t patch;
+};
+
 // External linkage required: DemoObject is a template argument to the weak
 // introspectImpl<T>/reconstructImpl<T> symbols oilgen fills in below (see
 // include/oi/oi.h) - a type declared in an anonymous namespace has no
@@ -77,12 +88,12 @@ IPv4Address makeIPv4(std::uint8_t a,
 //
 // Deliberately covers every member kind reconstruction supports today - a
 // nested-enum member, a scalar, a string, a vector, a map (including a
-// container-typed map key), and a trivially-copyable union - so this one
-// object exercises the full, currently-supported surface. Deliberately
-// does NOT include a nested class/struct member or a pointer member -
-// neither is supported by reconstruction yet (see
-// docs/object-capture-initial-thoughts.md's "explicit ordering for the
-// remaining reconstruction gaps").
+// container-typed map key), a trivially-copyable union, and a nested
+// (non-union) struct - so this one object exercises the full,
+// currently-supported surface. Deliberately does NOT include a pointer
+// member - that's not supported by reconstruction yet (see
+// docs/object-capture-initial-thoughts.md's "remaining reconstruction
+// gap").
 struct DemoObject {
   struct Status {
     enum Enum { PENDING, ACTIVE, DONE };
@@ -94,6 +105,7 @@ struct DemoObject {
   std::vector<std::int32_t> scores;
   std::map<std::string, std::int32_t> attributes;
   IPv4Address address;
+  Version version;
 };
 
 const char* statusName(DemoObject::Status::Enum status) {
@@ -138,6 +150,9 @@ void printDemoObject(const DemoObject& object, std::ostream& os) {
      << static_cast<int>(object.address.octets[2]) << '.'
      << static_cast<int>(object.address.octets[3]) << " (same bytes as raw=0x"
      << std::hex << object.address.whole << std::dec << ")\n";
+
+  os << "  version = " << object.version.major << '.' << object.version.minor
+     << '.' << object.version.patch << '\n';
 }
 
 DemoObject buildDemoObject() {
@@ -148,6 +163,7 @@ DemoObject buildDemoObject() {
       .scores = {10, 20, 30, 40, 50},
       .attributes = {{"alpha", 1}, {"beta", 2}, {"gamma", 3}},
       .address = makeIPv4(8, 8, 8, 8),
+      .version = Version{.major = 2, .minor = 1, .patch = 0},
   };
 }
 
