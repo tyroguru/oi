@@ -72,6 +72,16 @@ struct ContainerInfo {
      *   "map" - a homogeneous key/value container (e.g. std::map).
      *   `length` and `nextEntry()` (decodes and returns the next entry as
      *   a std::pair<T0, T1> - key first, value second) are in scope.
+     *
+     *   "pointer" - a single, possibly-absent owned value (std::unique_ptr
+     *   today - std::shared_ptr/std::weak_ptr and raw pointers share the
+     *   same underlying wire shape but aren't wired up to this calling
+     *   convention yet, see docs/object-capture-initial-thoughts.md).
+     *   `present` (a bool - whether the pointee was captured) and
+     *   `pointeeVal()` (decodes and returns the pointee, of type T0 - must
+     *   be called at most once, and only when `present` is true) are in
+     *   scope. No aliasing/cycle support: assumes sole ownership of the
+     *   pointee, true for unique_ptr by construction.
      */
     std::string reconstructKind = "";
     std::vector<Processor> processors{};

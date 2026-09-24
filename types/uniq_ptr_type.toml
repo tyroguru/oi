@@ -51,6 +51,20 @@ if constexpr (!oi_is_complete<T0>) {
 }
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# calling convention. No aliasing/cycle support yet: correct only because
+# std::unique_ptr guarantees sole ownership of its pointee, so its captured
+# address can never legitimately reappear elsewhere in the same object.
+reconstruct_kind = "pointer"
+reconstruct = """
+if (present) {
+  return std::make_unique<T0>(pointeeVal());
+}
+return %1%<T0>{};
+"""
+
 [[codegen.processor]]
 type = "types::st::VarInt<DB>"
 func = """
