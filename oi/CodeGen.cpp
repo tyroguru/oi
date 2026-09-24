@@ -1704,8 +1704,15 @@ std::string CodeGen::emitReconstructClassValue(Class& cls,
   const std::string resultVar = "c" + std::to_string(idCounter++);
   code += "  " + resolveTypeName(cls) + " " + resultVar + "{\n";
   for (size_t i = 0; i < n; i++) {
-    code += "    ." + std::string(members[i].name) + " = " + fieldExprs[i] +
-            ",\n";
+    // std::move, not a bare reference to fieldExprs[i]: most field
+    // expressions are already prvalues (a scalar reconstructScalar<T>()
+    // call, or another emitReconstruct*'s own IIFE result), for which
+    // this is a no-op, but a container-typed field's `v_result` is a
+    // named local (an lvalue) - needed so a move-only container element
+    // (e.g. std::unique_ptr<T>) doesn't hit its deleted copy constructor
+    // here.
+    code += "    ." + std::string(members[i].name) + " = std::move(" +
+            fieldExprs[i] + "),\n";
   }
   code += "  };\n";
   return resultVar;
@@ -1822,12 +1829,13 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
   }
   if (info.codegen.reconstructKind != "list" &&
       info.codegen.reconstructKind != "bytes" &&
-      info.codegen.reconstructKind != "map") {
+      info.codegen.reconstructKind != "map" &&
+      info.codegen.reconstructKind != "pointer") {
     throw std::runtime_error(
         "CodeGen::emitReconstructValue: " + info.typeName +
         " has `codegen.reconstruct` but an unrecognized or missing "
         "`codegen.reconstruct_kind` ('" + info.codegen.reconstructKind +
-        "') - expected \"list\", \"bytes\", or \"map\"");
+        "') - expected \"list\", \"bytes\", \"map\", or \"pointer\"");
   }
   if (cont->templateParams.empty()) {
     throw std::runtime_error(
@@ -1913,6 +1921,34 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     code += "  auto nextElement = [&]() {\n";
     code += nextElemCode;
     code += "    return " + nextElemExpr + ";\n";
+    code += "  };\n";
+  } else if (info.codegen.reconstructKind == "pointer") {
+    // A single, possibly-absent owned value (std::unique_ptr today - see
+    // ContainerInfo.h's calling-convention doc). lastVal is already the
+    // Sum<Unit, T0> ParsedData - the VarInt raw-address processor before
+    // it was already discarded (and drained) by the walk above, exactly
+    // like any other container's leading processors. Its value is never
+    // used here: no aliasing/cycle support yet, so "pointer"-kind
+    // reconstruction assumes sole ownership of the pointee (true for
+    // unique_ptr by construction - see
+    // docs/object-capture-initial-thoughts.md).
+    code += "  auto " + v + "_sum = std::get<oi::exporters::ParsedData::"
+            "Sum>(" + lastVal + ".val);\n";
+    code += "  bool present = " + v + "_sum.index == 1;\n";
+
+    // Recurse for the pointee type - its own decode statements land
+    // inside pointeeVal()'s lambda body, its own fresh C++ scope. Sum's
+    // alternative-0 shape is types::st::Unit (zero wire bytes by
+    // construction), so it's safe for the reconstruct text below to never
+    // call pointeeVal() at all when `present` is false - there is nothing
+    // to drain.
+    std::string pointeeCode;
+    std::string pointeeExpr = emitReconstructValue(
+        cont->templateParams[0].type(), v + "_sum.value()", idCounter,
+        pointeeCode);
+    code += "  auto pointeeVal = [&]() {\n";
+    code += pointeeCode;
+    code += "    return " + pointeeExpr + ";\n";
     code += "  };\n";
   } else if (info.codegen.reconstructKind == "map") {
     // A map's content processor is a List of (key, value) Pairs (see

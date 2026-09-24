@@ -60,4 +60,5 @@ pass_through = [
     ["std::char_traits", "string"],
     ["folly::fbstring_core", "folly/FBString.h"],
     ["std::less", "functional"],
+    ["std::default_delete", "memory"],
 ]
