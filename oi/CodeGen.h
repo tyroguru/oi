@@ -91,9 +91,11 @@ class CodeGen {
    * docs/object-capture-initial-thoughts.md, not part of this repo) -
    * generates the read-side counterpart to generate() above: given a root
    * type's captured bytes, produce a live instance of it. Supports a
-   * scalar (Primitive) root type, and a flat struct/class of scalar
-   * members (raw byte replay, no pointer fixup or nested class/container
-   * members yet) - see generateReconstructScalar/generateReconstructClassBody.
+   * scalar (Primitive) root type, or a struct/class root whose members may
+   * be any mix of scalars, enums, trivially-copyable unions, reconstructable
+   * containers, and nested (non-union) classes/structs, recursively - no
+   * pointer fixup yet - see
+   * generateReconstructScalar/generateReconstructClassBody/emitReconstructValue.
    * Self-contained: clears `code` and emits its own includes/preamble, for
    * use when nothing else populated `code` for this TypeGraph first. For
    * the combined introspect+reconstruct-of-the-same-root case, see
@@ -128,6 +130,10 @@ class CodeGen {
   void generateReconstructClassBody(type_graph::Class& cls,
                                     const std::string& typeToHash,
                                     std::string& code);
+  std::string emitReconstructClassValue(type_graph::Class& cls,
+                                        const std::string& parsedDataExpr,
+                                        size_t& idCounter,
+                                        std::string& code);
   void generateReconstructContainerBody(type_graph::Container& container,
                                         const std::string& typeToHash,
                                         std::string& code);
