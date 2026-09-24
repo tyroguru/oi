@@ -136,7 +136,7 @@ void addPreprocessorDefines(const OICodeGenConfig& config, std::string& code) {
 void addIncludes(const TypeGraph& typeGraph,
                  const OICodeGenConfig& config,
                  std::string& code) {
-  std::set<std::string_view> includes{"cstddef"};
+  std::set<std::string_view> includes{"cstddef", "stdexcept"};
   if (config.features[Feature::TreeBuilderV2]) {
     code += "#define DEFINE_DESCRIBE 1\n";  // added before all includes
 
@@ -1882,11 +1882,20 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
   // a Lazy invocation like list.values() that used that same describe
   // value internally (a nested call) - either way no second parse is
   // needed here, just walking what's already there.
+  //
+  // Each discarded processor's own ParsedData is kept as a named local
+  // (v_discarded_i) rather than draining the Lazy invocation expression
+  // directly - every existing calling convention still just ignores these,
+  // but "pointer" (below) needs to inspect processor 0's actual decoded
+  // value (the raw captured address), not just skip past it - and a Lazy
+  // can only be invoked once, so it has to be captured here, at the one
+  // point it's invoked, rather than re-invoked later.
   std::string lastVal = v + "_data";
   if (n > 1) {
     code += "  auto " + v + "_pair_0 = std::get<oi::exporters::ParsedData::"
             "Pair>(" + lastVal + ".val);\n";
-    code += "  oi::exporters::drainParsedData(" + v + "_pair_0.first());\n";
+    code += "  auto " + v + "_discarded_0 = " + v + "_pair_0.first();\n";
+    code += "  oi::exporters::drainParsedData(" + v + "_discarded_0);\n";
     for (size_t i = 0; i < n - 1; i++) {
       if (i == n - 2) {
         lastVal = v + "_last";
@@ -1898,8 +1907,10 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
         code += "  auto " + v + "_pair_" + std::to_string(i + 1) +
                 " = std::get<oi::exporters::ParsedData::Pair>(" + v +
                 "_next_" + std::to_string(i) + ".val);\n";
-        code += "  oi::exporters::drainParsedData(" + v + "_pair_" +
-                std::to_string(i + 1) + ".first());\n";
+        code += "  auto " + v + "_discarded_" + std::to_string(i + 1) +
+                " = " + v + "_pair_" + std::to_string(i + 1) + ".first();\n";
+        code += "  oi::exporters::drainParsedData(" + v + "_discarded_" +
+                std::to_string(i + 1) + ");\n";
       }
     }
   }
@@ -1923,18 +1934,30 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     code += "    return " + nextElemExpr + ";\n";
     code += "  };\n";
   } else if (info.codegen.reconstructKind == "pointer") {
-    // A single, possibly-absent owned value (std::unique_ptr today - see
-    // ContainerInfo.h's calling-convention doc). lastVal is already the
-    // Sum<Unit, T0> ParsedData - the VarInt raw-address processor before
-    // it was already discarded (and drained) by the walk above, exactly
-    // like any other container's leading processors. Its value is never
-    // used here: no aliasing/cycle support yet, so "pointer"-kind
-    // reconstruction assumes sole ownership of the pointee (true for
-    // unique_ptr by construction - see
-    // docs/object-capture-initial-thoughts.md).
+    // A single, possibly-absent owned value (std::unique_ptr,
+    // std::shared_ptr - see ContainerInfo.h's calling-convention doc).
+    // lastVal is the Sum<Unit, T0> ParsedData; v_discarded_0 is the
+    // VarInt processor before it - the raw captured pointer address -
+    // already drained for iterator alignment by the walk above, but its
+    // *value* is also needed here: Sum index 0 alone is ambiguous
+    // between "genuinely null" (address == 0) and "non-null, but this
+    // address was already captured elsewhere" (aliasing, for
+    // std::shared_ptr, or a cycle's back-edge, for either) - see
+    // docs/object-capture-initial-thoughts.md. Only the latter is
+    // actually unsupported (no address→object registry exists yet), so
+    // it gets a clear, explicit error rather than silently reconstructing
+    // a second, independent copy or a wrong null.
+    code += "  auto " + v + "_addr = std::get<oi::exporters::ParsedData::"
+            "VarInt>(" + v + "_discarded_0.val).value;\n";
     code += "  auto " + v + "_sum = std::get<oi::exporters::ParsedData::"
             "Sum>(" + lastVal + ".val);\n";
     code += "  bool present = " + v + "_sum.index == 1;\n";
+    code += "  if (!present && " + v + "_addr != 0) {\n";
+    code += "    throw std::runtime_error(\"oi::reconstruct: " +
+            info.typeName +
+            " - aliasing or a cycle detected (a captured pointer address "
+            "was reused) - not yet supported\");\n";
+    code += "  }\n";
 
     // Recurse for the pointee type - its own decode statements land
     // inside pointeeVal()'s lambda body, its own fresh C++ scope. Sum's
@@ -2128,6 +2151,7 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
   code += "#include <oi/types/dy.h>\n";
   code += "#include <cstdint>\n";
   code += "#include <span>\n";
+  code += "#include <stdexcept>\n";
   code += "#include <vector>\n\n";
 
   if (container || cls) {
