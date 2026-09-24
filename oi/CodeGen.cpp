@@ -1412,14 +1412,15 @@ std::string resolveTypeName(Type& t) {
   if (auto* en = dynamic_cast<Enum*>(&resolved))
     return "OIInternal::" + en->name();
 
-  // A trivially-copyable union (see addTypeHandlers' comment on why it's
-  // reconstructed via the same raw-bytes path as a scalar or enum, not
-  // walked member-by-member) is declared by genDefsClass the same way a
-  // struct/class is - inside `namespace OIInternal { namespace {...} }` -
-  // so it needs the same qualification as an Enum's name to remain
-  // resolvable from reconstructImpl<T>'s global-scope function body.
-  if (auto* cls = dynamic_cast<Class*>(&resolved);
-      cls && cls->kind() == Class::Kind::Union)
+  // A class or struct - whether a trivially-copyable union (reconstructed
+  // via the same raw-bytes path as a scalar or enum, not walked
+  // member-by-member - see addTypeHandlers' comment) or a plain nested
+  // class/struct (reconstructed member-by-member, see
+  // emitReconstructClassValue) - is declared by genDefsClass the same way,
+  // inside `namespace OIInternal { namespace {...} }`, so it needs the
+  // same qualification as an Enum's name to remain resolvable from
+  // reconstructImpl<T>'s global-scope function body.
+  if (auto* cls = dynamic_cast<Class*>(&resolved))
     return "OIInternal::" + cls->name();
 
   if (auto* cont = dynamic_cast<Container*>(&resolved)) {
@@ -1445,7 +1446,8 @@ std::string resolveTypeName(Type& t) {
 
 struct ReconstructableMember {
   std::string_view name;
-  Type* type;  // already unwrapped past any Typedef - Primitive or Container
+  Type* type;  // already unwrapped past any Typedef - Primitive, Enum,
+               // Class, or Container
 };
 
 }  // namespace
@@ -1490,18 +1492,16 @@ std::vector<ReconstructableMember> collectReconstructableMembers(
       continue;
 
     Type& resolved = unwrapTypedefs(member.type());
-    const auto* resolvedClass = dynamic_cast<Class*>(&resolved);
-    bool isUnion = resolvedClass && resolvedClass->kind() == Class::Kind::Union;
     if (!dynamic_cast<Primitive*>(&resolved) &&
-        !dynamic_cast<Enum*>(&resolved) && !isUnion &&
+        !dynamic_cast<Enum*>(&resolved) && !dynamic_cast<Class*>(&resolved) &&
         !dynamic_cast<Container*>(&resolved)) {
       throw std::runtime_error(
           "CodeGen::generateReconstructClass: member " + cls.name() + "::" +
           member.name +
-          " is neither a scalar, an enum, a union, nor a reconstructable "
+          " is neither a scalar, an enum, a class, nor a reconstructable "
           "container - not yet supported (see "
-          "docs/object-capture-initial-thoughts.md - pointer fixup and "
-          "nested (non-union) class members are not yet implemented)");
+          "docs/object-capture-initial-thoughts.md - pointer fixup is not "
+          "yet implemented)");
     }
 
     members.push_back({.name = member.name, .type = &resolved});
@@ -1571,10 +1571,11 @@ void CodeGen::generateReconstructClassPreamble(TypeGraph& typeGraph,
   code += "} // namespace\n} // namespace OIInternal\n";
 }
 
-// The class/struct slice of the reconstruction scaffold: raw byte replay
-// for a flat struct of scalar members, no pointer fixup or nested
-// class/container members yet (see
-// docs/object-capture-initial-thoughts.md). Mirrors genClassStaticType's
+// The class/struct slice of the reconstruction scaffold: recursively
+// reconstructs every member (scalar, enum, trivially-copyable union,
+// reconstructable container, or nested non-union class/struct - see
+// emitReconstructValue/emitReconstructClassValue) - no pointer fixup yet
+// (see docs/object-capture-initial-thoughts.md). Mirrors genClassStaticType's
 // wire shape - a right-nested chain of types::st::Pair<leaf, ...> - but
 // built from the runtime types::dy:: descriptors instead, since this code
 // has to decode a shape it didn't just statically encode. Assumes
@@ -1633,11 +1634,44 @@ void CodeGen::generateReconstructClassBody(Class& cls,
           ");\n";
 
   size_t idCounter = 0;
-  std::vector<std::string> fieldExprs(n);
+  std::string resultExpr =
+      emitReconstructClassValue(cls, "parsed", idCounter, code);
 
+  code += "  return " + resultExpr + ";\n";
+  code += "}\n";
+}
+
+// Recursively reconstructs a non-union Class from `parsedDataExpr`'s own
+// already-parsed ParsedData - shared by generateReconstructClassBody (the
+// root-type entry point, `parsedDataExpr` being the whole-object ParsedData
+// straight out of ParsedData::parse) and emitReconstructValue's own Class
+// branch (a nested class-typed member, `parsedDataExpr` being that
+// member's slice of the enclosing object's ParsedData). A class member's
+// own TypeHandler<Ctx,T>::type::describe is composed exactly the same way
+// the root's is (see genClassStaticType: a right-nested types::st::Pair
+// chain, one per member, collapsing to a bare leaf for a single-member
+// class) - so `parsedDataExpr` already holds a matching ParsedData::Pair
+// chain (or bare leaf) with no separate shape bootstrap needed here, unlike
+// the root entry point, which has to conjure that shape itself to call
+// ParsedData::parse on raw bytes in the first place.
+//
+// Every local name this emits is idCounter-suffixed, not bare, so it's
+// safe to call more than once into the same enclosing C++ scope - e.g. a
+// class with two nested-class-typed members, or several levels of nesting,
+// none of which get their own lambda scope the way a container member does
+// (see emitReconstructValue's Container branch) since there are no
+// toml-supplied bare names here to collide.
+std::string CodeGen::emitReconstructClassValue(Class& cls,
+                                               const std::string& parsedDataExpr,
+                                               size_t& idCounter,
+                                               std::string& code) {
+  std::vector<ReconstructableMember> members = collectReconstructableMembers(cls);
+  size_t n = members.size();
+
+  std::vector<std::string> fieldExprs(n);
   if (n == 1) {
     fieldExprs[0] =
-        emitReconstructValue(*members[0].type, "parsed", idCounter, code);
+        emitReconstructValue(*members[0].type, parsedDataExpr, idCounter, code);
   } else {
     // ParsedData::Pair holds Lazy fields, which hold a reference member -
     // that deletes Pair's copy *assignment* (though not construction), so
@@ -1646,33 +1680,35 @@ void CodeGen::generateReconstructClassBody(Class& cls,
     // called before second() at each level - both share the same
     // underlying iterator, so second() would parse from the wrong offset
     // if evaluated first.
-    code += "  auto pair_0 = std::get<oi::exporters::ParsedData::Pair>(parsed."
-            "val);\n";
+    const std::string p = "p" + std::to_string(idCounter++);
+    code += "  auto " + p + "_0 = std::get<oi::exporters::ParsedData::Pair>((" +
+            parsedDataExpr + ").val);\n";
     for (size_t i = 0; i < n - 1; i++) {
       fieldExprs[i] = emitReconstructValue(
-          *members[i].type, "pair_" + std::to_string(i) + ".first()",
+          *members[i].type, p + "_" + std::to_string(i) + ".first()",
           idCounter, code);
       if (i == n - 2) {
         fieldExprs[i + 1] = emitReconstructValue(
-            *members[i + 1].type, "pair_" + std::to_string(i) + ".second()",
+            *members[i + 1].type, p + "_" + std::to_string(i) + ".second()",
             idCounter, code);
       } else {
-        code += "  auto next_" + std::to_string(i) + " = pair_" +
-                std::to_string(i) + ".second();\n";
-        code += "  auto pair_" + std::to_string(i + 1) +
-                " = std::get<oi::exporters::ParsedData::Pair>(next_" +
-                std::to_string(i) + ".val);\n";
+        code += "  auto " + p + "_next_" + std::to_string(i) + " = " + p +
+                "_" + std::to_string(i) + ".second();\n";
+        code += "  auto " + p + "_" + std::to_string(i + 1) +
+                " = std::get<oi::exporters::ParsedData::Pair>(" + p +
+                "_next_" + std::to_string(i) + ".val);\n";
       }
     }
   }
 
-  code += "  return OIInternal::__ROOT_TYPE__{\n";
+  const std::string resultVar = "c" + std::to_string(idCounter++);
+  code += "  " + resolveTypeName(cls) + " " + resultVar + "{\n";
   for (size_t i = 0; i < n; i++) {
     code += "    ." + std::string(members[i].name) + " = " + fieldExprs[i] +
             ",\n";
   }
   code += "  };\n";
-  code += "}\n";
+  return resultVar;
 }
 
 // The container slice of the reconstruction scaffold: a "list"-kind
@@ -1746,28 +1782,35 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
            ">(std::get<oi::exporters::ParsedData::Bytes>(" + v + "_data.val))";
   }
 
-  if (auto* cls = dynamic_cast<Class*>(resolved);
-      cls && cls->kind() == Class::Kind::Union) {
-    // A union's members are already unknown to us by this point (see
-    // addTypeHandlers' comment) - the write side captured its raw bytes as
-    // one opaque Bytes<sizeof(T)> leaf, exactly like a scalar or enum, so
-    // reconstruction is the same bit_cast round trip. Only sound for a
-    // trivially-copyable union (true for essentially every real-world raw
-    // C-style union - one holding a non-trivial member forces the
-    // developer to write that union's special member functions by hand,
-    // which is rare and deliberate) - reconstructScalar<T>'s own
-    // std::bit_cast requires this at compile time, so a union that somehow
-    // isn't trivially copyable fails to build here with a clear compiler
-    // error rather than silently doing something unsafe.
-    return "oi::exporters::reconstructScalar<" + resolveTypeName(*resolved) +
-           ">(std::get<oi::exporters::ParsedData::Bytes>(" + v + "_data.val))";
+  if (auto* cls = dynamic_cast<Class*>(resolved)) {
+    if (cls->kind() == Class::Kind::Union) {
+      // A union's members are already unknown to us by this point (see
+      // addTypeHandlers' comment) - the write side captured its raw bytes as
+      // one opaque Bytes<sizeof(T)> leaf, exactly like a scalar or enum, so
+      // reconstruction is the same bit_cast round trip. Only sound for a
+      // trivially-copyable union (true for essentially every real-world raw
+      // C-style union - one holding a non-trivial member forces the
+      // developer to write that union's special member functions by hand,
+      // which is rare and deliberate) - reconstructScalar<T>'s own
+      // std::bit_cast requires this at compile time, so a union that somehow
+      // isn't trivially copyable fails to build here with a clear compiler
+      // error rather than silently doing something unsafe.
+      return "oi::exporters::reconstructScalar<" + resolveTypeName(*resolved) +
+             ">(std::get<oi::exporters::ParsedData::Bytes>(" + v +
+             "_data.val))";
+    }
+
+    // A plain (non-union) nested class/struct member: recurse into its own
+    // members exactly like the root type does - see
+    // generateReconstructClassBody/emitReconstructClassValue.
+    return emitReconstructClassValue(*cls, v + "_data", idCounter, code);
   }
 
   auto* cont = dynamic_cast<Container*>(resolved);
   if (!cont) {
     throw std::runtime_error(
         "CodeGen::emitReconstructValue: " + resolved->name() +
-        " is neither a scalar, an enum, a union, nor a reconstructable "
+        " is neither a scalar, an enum, a class, nor a reconstructable "
         "container - not yet supported");
   }
 
