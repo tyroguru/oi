@@ -35,6 +35,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -81,6 +82,20 @@ struct Version {
   std::int32_t patch;
 };
 
+// A std::unique_ptr-owned nested struct - reconstructed via the new
+// "pointer" calling convention (see ContainerInfo.h's
+// reconstruct/reconstruct_kind docs and
+// docs/object-capture-initial-thoughts.md's unique_ptr section, not part
+// of this repo): present/absent decoded from a Sum<Unit, T>, and the
+// pointee (when present) reconstructed recursively via the exact same
+// class-member machinery Version itself uses - a unique_ptr to a struct,
+// not just to a scalar, so this exercises both new mechanisms composed
+// together.
+struct ContactInfo {
+  std::string email;
+  std::int32_t extension;
+};
+
 // External linkage required: DemoObject is a template argument to the weak
 // introspectImpl<T>/reconstructImpl<T> symbols oilgen fills in below (see
 // include/oi/oi.h) - a type declared in an anonymous namespace has no
@@ -88,12 +103,13 @@ struct Version {
 //
 // Deliberately covers every member kind reconstruction supports today - a
 // nested-enum member, a scalar, a string, a vector, a map (including a
-// container-typed map key), a trivially-copyable union, and a nested
-// (non-union) struct - so this one object exercises the full,
-// currently-supported surface. Deliberately does NOT include a pointer
-// member - that's not supported by reconstruction yet (see
+// container-typed map key), a trivially-copyable union, a nested
+// (non-union) struct, and a std::unique_ptr to a nested struct - so this
+// one object exercises the full, currently-supported surface. Deliberately
+// does NOT include a raw pointer, std::shared_ptr, or std::weak_ptr
+// member - none of those are supported by reconstruction yet (see
 // docs/object-capture-initial-thoughts.md's "remaining reconstruction
-// gap").
+// gaps").
 struct DemoObject {
   struct Status {
     enum Enum { PENDING, ACTIVE, DONE };
@@ -106,6 +122,7 @@ struct DemoObject {
   std::map<std::string, std::int32_t> attributes;
   IPv4Address address;
   Version version;
+  std::unique_ptr<ContactInfo> contact;
 };
 
 const char* statusName(DemoObject::Status::Enum status) {
@@ -153,6 +170,13 @@ void printDemoObject(const DemoObject& object, std::ostream& os) {
 
   os << "  version = " << object.version.major << '.' << object.version.minor
      << '.' << object.version.patch << '\n';
+
+  os << "  contact = ";
+  if (object.contact) {
+    os << object.contact->email << " x" << object.contact->extension << '\n';
+  } else {
+    os << "(none)\n";
+  }
 }
 
 DemoObject buildDemoObject() {
@@ -164,6 +188,8 @@ DemoObject buildDemoObject() {
       .attributes = {{"alpha", 1}, {"beta", 2}, {"gamma", 3}},
       .address = makeIPv4(8, 8, 8, 8),
       .version = Version{.major = 2, .minor = 1, .patch = 0},
+      .contact = std::make_unique<ContactInfo>(
+          ContactInfo{.email = "support@example.com", .extension = 4242}),
   };
 }
 
