@@ -52,19 +52,31 @@ if constexpr (!oi_is_complete<T0>) {
 
 # Research groundwork for byte-accurate object capture/reconstruction (see
 # docs/object-capture-initial-thoughts.md, not part of this repo) - see
-# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
-# calling convention. Unlike std::unique_ptr, std::shared_ptr genuinely
-# allows aliasing (multiple shared_ptrs to the same object) - the shared
-# "pointer"-kind codegen throws a clear error if it ever detects that,
-# rather than silently reconstructing an independent copy. Only a
-# non-aliased shared_ptr (every captured instance owns a pointee no other
-# captured pointer also points at) round-trips correctly today.
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind`/
+# `reconstruct_uses_alias_registry` field docs for the calling convention.
+# Unlike std::unique_ptr, std::shared_ptr genuinely allows aliasing
+# (multiple shared_ptrs to the same object) - registerAlias/lookupAlias
+# (in scope because reconstruct_uses_alias_registry is set below) resolve
+# a repeated address to the same already-reconstructed instance. A
+# lookupAlias() miss still means a cycle (the address was seen, but
+# nothing finished constructing it yet) - not yet supported, so that
+# still throws.
 reconstruct_kind = "pointer"
+reconstruct_uses_alias_registry = true
 reconstruct = """
 if (present) {
-  return std::make_shared<T0>(pointeeVal());
+  return registerAlias(std::make_shared<T0>(pointeeVal()));
 }
-return %1%<T0>{};
+if (address == 0) {
+  return %1%<T0>{};
+}
+if (auto aliased = lookupAlias()) {
+  return *aliased;
+}
+throw std::runtime_error(
+    "oi::reconstruct: %1% - cycle detected (a captured pointer address "
+    "was reused but nothing has finished reconstructing it yet) - not "
+    "yet supported");
 """
 
 [[codegen.processor]]
