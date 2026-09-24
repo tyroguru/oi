@@ -25,9 +25,14 @@ member-by-member, the same way `DemoObject` itself is - a
 with a made-up support email/extension), reconstructed via the same
 present/absent decoding used for any `std::unique_ptr`, recursing into
 `ContactInfo`'s own members exactly like the plain nested struct case -
-and a non-aliased `std::shared_ptr<int32_t>` (populated with `5`),
-reconstructed via the same present/absent decoding, just constructing
-with `std::make_shared` instead of `std::make_unique`.
+and two `std::shared_ptr<int32_t>` members, `priority` and
+`priorityAlias`, that deliberately **alias each other** (point at the
+exact same underlying `int`, not just equal values) - proving OI's
+address→object registry resolves a repeated captured pointer address to
+one shared instance rather than reconstructing a second, independent
+copy. This only works because the pointee (a plain `int32_t`) isn't
+self-referential - a genuine *cycle* still isn't supported (see "Known
+limitations" below).
 
 Only `--transport local` is implemented today. `--transport remote` is
 accepted on the command line but rejected at runtime - it's a placeholder for
@@ -117,14 +122,15 @@ client: original object:
   version = 2.1.0
   contact = support@example.com x4242
   priority = 5
-client: captured 252 bytes, sending via transport=local
+  priorityAlias = 5 (same object as priority: true, use_count=2)
+client: captured 260 bytes, sending via transport=local
 client: done
 ```
 
 Within 5 seconds, the server's next poll picks up the file and finishes:
 
 ```
-server: received 252 bytes, reconstructing...
+server: received 260 bytes, reconstructing...
 server: reconstructed object:
   status = ACTIVE
   id = 42
@@ -135,7 +141,15 @@ server: reconstructed object:
   version = 2.1.0
   contact = support@example.com x4242
   priority = 5
+  priorityAlias = 5 (same object as priority: true, use_count=2)
 ```
+
+The `priorityAlias` line matching `true`/`use_count=2` on the
+reconstructed side is the interesting part: the server process never
+shared memory with the client, yet it correctly rebuilt `priority` and
+`priorityAlias` as two owners of one shared object, purely from the
+address information in the byte stream - not two independent copies
+that merely happen to hold equal values.
 
 The two printouts matching, despite the server process never having touched
 the client's memory, is the whole demo.
@@ -173,8 +187,13 @@ transport:
 - **Not every member type is reconstructable yet.** `DemoObject` deliberately
   sticks to what's supported today (enum, scalar, string, vector, map,
   trivially-copyable union, nested non-union struct, `std::unique_ptr`,
-  non-aliased `std::shared_ptr`). Raw pointers and `std::weak_ptr` aren't
-  yet, and neither is an *aliased* `std::shared_ptr` (two pointers to the
-  same object) - that throws a clear error rather than reconstructing
-  wrong data, since there's no address→object registry yet to resolve it
-  correctly.
+  aliased `std::shared_ptr`). Raw pointers and `std::weak_ptr` aren't yet.
+- **Aliasing works, but only for non-self-referential pointees.** A
+  genuine *cycle* (e.g. a linked-list node whose own type contains a
+  `std::shared_ptr` back to itself) isn't reconstructable, and isn't even
+  capturable today: OI's static type system can't represent a
+  self-referential type at all (a pre-existing, upstream-tracked
+  limitation - `facebookexperimental/object-introspection#293` - not
+  something this demo or reconstruction specifically can fix). `priority`/
+  `priorityAlias` alias each other safely here only because their pointee,
+  a plain `int32_t`, isn't self-referential.

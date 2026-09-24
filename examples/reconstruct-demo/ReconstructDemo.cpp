@@ -104,13 +104,18 @@ struct ContactInfo {
 // Deliberately covers every member kind reconstruction supports today - a
 // nested-enum member, a scalar, a string, a vector, a map (including a
 // container-typed map key), a trivially-copyable union, a nested
-// (non-union) struct, a std::unique_ptr to a nested struct, and a
-// non-aliased std::shared_ptr to a scalar - so this one object exercises
-// the full, currently-supported surface. Deliberately does NOT include a
-// raw pointer or std::weak_ptr member, nor a std::shared_ptr that aliases
-// another pointer to the same object - none of those are supported by
-// reconstruction yet (see docs/object-capture-initial-thoughts.md's
-// "remaining reconstruction gaps").
+// (non-union) struct, a std::unique_ptr to a nested struct, and two
+// std::shared_ptr members that ALIAS each other (point at the same
+// underlying int) - so this one object exercises the full,
+// currently-supported surface, including real aliasing (see
+// docs/object-capture-initial-thoughts.md's address->object registry
+// section: this only works because `priority`'s pointee type, a plain
+// int32_t, isn't self-referential - a genuine *cycle* still isn't
+// supported). Deliberately does NOT include a raw pointer, a
+// std::weak_ptr member, or anything self-referential - none of those are
+// supported by reconstruction yet (see
+// docs/object-capture-initial-thoughts.md's "remaining reconstruction
+// gaps").
 struct DemoObject {
   struct Status {
     enum Enum { PENDING, ACTIVE, DONE };
@@ -125,6 +130,7 @@ struct DemoObject {
   Version version;
   std::unique_ptr<ContactInfo> contact;
   std::shared_ptr<std::int32_t> priority;
+  std::shared_ptr<std::int32_t> priorityAlias;  // SAME object as priority
 };
 
 const char* statusName(DemoObject::Status::Enum status) {
@@ -186,9 +192,27 @@ void printDemoObject(const DemoObject& object, std::ostream& os) {
   } else {
     os << "(none)\n";
   }
+
+  os << "  priorityAlias = ";
+  if (object.priorityAlias) {
+    os << *object.priorityAlias << " (same object as priority: "
+       << std::boolalpha
+       << (object.priority.get() == object.priorityAlias.get())
+       << ", use_count=" << object.priority.use_count() << ")\n"
+       << std::noboolalpha;
+  } else {
+    os << "(none)\n";
+  }
 }
 
 DemoObject buildDemoObject() {
+  // Built as a separate local, not inline in the aggregate-init below, so
+  // .priority and .priorityAlias can both be assigned the exact same
+  // shared_ptr - genuine aliasing (two owners of one object), not two
+  // separately-constructed instances that merely happen to hold equal
+  // values.
+  auto priority = std::make_shared<std::int32_t>(5);
+
   return DemoObject{
       .status = DemoObject::Status::ACTIVE,
       .id = 42,
@@ -199,7 +223,8 @@ DemoObject buildDemoObject() {
       .version = Version{.major = 2, .minor = 1, .patch = 0},
       .contact = std::make_unique<ContactInfo>(
           ContactInfo{.email = "support@example.com", .extension = 4242}),
-      .priority = std::make_shared<std::int32_t>(5),
+      .priority = priority,
+      .priorityAlias = priority,
   };
 }
 
