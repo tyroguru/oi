@@ -127,14 +127,16 @@ class CodeGen {
   void generateReconstructClassPreamble(type_graph::TypeGraph& typeGraph,
                                         type_graph::Class& cls,
                                         std::string& code);
-  void generateReconstructClassBody(type_graph::Class& cls,
+  void generateReconstructClassBody(type_graph::TypeGraph& typeGraph,
+                                    type_graph::Class& cls,
                                     const std::string& typeToHash,
                                     std::string& code);
   std::string emitReconstructClassValue(type_graph::Class& cls,
                                         const std::string& parsedDataExpr,
                                         size_t& idCounter,
                                         std::string& code);
-  void generateReconstructContainerBody(type_graph::Container& container,
+  void generateReconstructContainerBody(type_graph::TypeGraph& typeGraph,
+                                        type_graph::Container& container,
                                         const std::string& typeToHash,
                                         std::string& code);
   std::string emitReconstructValue(type_graph::Type& elemType,
@@ -143,6 +145,8 @@ class CodeGen {
                                    std::string& code);
   void emitReconstructTypeHandlerSupport(type_graph::TypeGraph& typeGraph,
                                          std::string& code);
+  void emitAliasRegistries(type_graph::TypeGraph& typeGraph,
+                           std::string& code);
 
   type_graph::TypeGraph typeGraph_;
   const OICodeGenConfig& config_;
@@ -151,6 +155,15 @@ class CodeGen {
   std::unordered_set<const ContainerInfo*> definedContainers_;
   std::unordered_map<const type_graph::Class*, const type_graph::Member*>
       thriftIssetMembers_;
+  // Research groundwork for byte-accurate object capture/reconstruction
+  // (see docs/object-capture-initial-thoughts.md, not part of this repo) -
+  // populated fresh by emitAliasRegistries for each reconstruct-generation
+  // call, mapping a "container-type-name|pointee-type-name" key to the
+  // index of the __oi_alias_registry_N variable it just declared, so
+  // emitReconstructValue's later, per-member "pointer" branch calls know
+  // which one to reference for a given container instance without needing
+  // that index threaded through every function's parameters.
+  std::unordered_map<std::string, size_t> aliasRegistryIndices_;
 
   bool codegenFromDrgn(struct drgn_type* drgnType,
                        std::string& code,

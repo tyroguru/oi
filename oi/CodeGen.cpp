@@ -136,7 +136,8 @@ void addPreprocessorDefines(const OICodeGenConfig& config, std::string& code) {
 void addIncludes(const TypeGraph& typeGraph,
                  const OICodeGenConfig& config,
                  std::string& code) {
-  std::set<std::string_view> includes{"cstddef", "stdexcept"};
+  std::set<std::string_view> includes{"cstddef", "optional", "stdexcept",
+                                      "unordered_map"};
   if (config.features[Feature::TreeBuilderV2]) {
     code += "#define DEFINE_DESCRIBE 1\n";  // added before all includes
 
@@ -1548,6 +1549,49 @@ void CodeGen::emitReconstructTypeHandlerSupport(TypeGraph& typeGraph,
   addTypeHandlers(typeGraph, code);
 }
 
+// Research groundwork for byte-accurate object capture/reconstruction (see
+// docs/object-capture-initial-thoughts.md, not part of this repo) -
+// declares one std::unordered_map<uint64_t, ContainerType> per distinct
+// (container-type-name, pointee-type-name) pair reachable from this root
+// whose ContainerInfo opts into aliasing support (currently just
+// std::shared_ptr - see ContainerInfo.h's reconstructUsesAliasRegistry
+// doc), at the very top of the reconstruct function body - before any
+// member decoding, so every nested `[&]`-capturing lambda
+// emitReconstructValue's "pointer" branch later generates (however deeply
+// nested) can already see it by ordinary reference-capture, with no
+// explicit threading needed. Keyed by name rather than by Container node
+// identity: the same std::shared_ptr<Widget> instantiation can appear as
+// more than one Container node in the type graph (e.g. two separate
+// member fields), and all of them must resolve to the *same* registry for
+// aliasing between them to be detected at all.
+//
+// Repopulates aliasRegistryIndices_ from scratch each call - this and
+// emitReconstructValue's later lookups are always paired within a single
+// generate()/generateReconstruct() call for one root, so nothing from a
+// previous root (if this CodeGen instance is ever reused for another) can
+// leak in as a stale, wrongly-reused index.
+void CodeGen::emitAliasRegistries(TypeGraph& typeGraph, std::string& code) {
+  aliasRegistryIndices_.clear();
+  for (Type& t : typeGraph.finalTypes) {
+    auto* cont = dynamic_cast<Container*>(&t);
+    if (!cont || !cont->containerInfo_.codegen.reconstructUsesAliasRegistry ||
+        cont->templateParams.empty()) {
+      continue;
+    }
+
+    std::string key = cont->containerInfo_.typeName + "|" +
+                      resolveTypeName(cont->templateParams[0].type());
+    if (aliasRegistryIndices_.contains(key)) {
+      continue;
+    }
+
+    size_t index = aliasRegistryIndices_.size();
+    aliasRegistryIndices_.emplace(std::move(key), index);
+    code += "  std::unordered_map<uint64_t, " + resolveTypeName(*cont) +
+            "> __oi_alias_registry_" + std::to_string(index) + ";\n";
+  }
+}
+
 // Emits the struct's own redeclaration (internal-linkage, layout-identical
 // to the real type - see generate()'s identical trick for introspectImpl)
 // and the OIInternal::__ROOT_TYPE__ alias the body below depends on. Split
@@ -1583,7 +1627,8 @@ void CodeGen::generateReconstructClassPreamble(TypeGraph& typeGraph,
 // same call's own generateReconstructClassPreamble (standalone reconstruct)
 // or from generate()'s equivalent redeclaration for the same root (the
 // combined case).
-void CodeGen::generateReconstructClassBody(Class& cls,
+void CodeGen::generateReconstructClassBody(TypeGraph& typeGraph,
+                                           Class& cls,
                                            const std::string& typeToHash,
                                            std::string& code) {
   std::vector<ReconstructableMember> members = collectReconstructableMembers(cls);
@@ -1628,6 +1673,7 @@ void CodeGen::generateReconstructClassBody(Class& cls,
 
   code += "extern \"C\" OIInternal::__ROOT_TYPE__ " + typeToHash +
           "(std::span<const uint8_t> bytes) {\n";
+  emitAliasRegistries(typeGraph, code);
   code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
   code += "  auto it = vec.cbegin();\n";
   code += "  auto parsed = oi::exporters::ParsedData::parse(it, " + shapeVar +
@@ -1943,21 +1989,63 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     // between "genuinely null" (address == 0) and "non-null, but this
     // address was already captured elsewhere" (aliasing, for
     // std::shared_ptr, or a cycle's back-edge, for either) - see
-    // docs/object-capture-initial-thoughts.md. Only the latter is
-    // actually unsupported (no address→object registry exists yet), so
-    // it gets a clear, explicit error rather than silently reconstructing
-    // a second, independent copy or a wrong null.
+    // docs/object-capture-initial-thoughts.md.
     code += "  auto " + v + "_addr = std::get<oi::exporters::ParsedData::"
             "VarInt>(" + v + "_discarded_0.val).value;\n";
     code += "  auto " + v + "_sum = std::get<oi::exporters::ParsedData::"
             "Sum>(" + lastVal + ".val);\n";
     code += "  bool present = " + v + "_sum.index == 1;\n";
-    code += "  if (!present && " + v + "_addr != 0) {\n";
-    code += "    throw std::runtime_error(\"oi::reconstruct: " +
-            info.typeName +
-            " - aliasing or a cycle detected (a captured pointer address "
-            "was reused) - not yet supported\");\n";
-    code += "  }\n";
+
+    if (info.codegen.reconstructUsesAliasRegistry) {
+      // A repeated non-null address might be resolvable (aliasing - the
+      // address was already fully reconstructed elsewhere, so hand back
+      // a copy sharing ownership) or might not be (a cycle - the address
+      // was seen, via ctx.pointers.add on the write side, but nothing
+      // has *finished* reconstructing it yet, since that's still further
+      // up the current recursion). registerAlias/lookupAlias below are
+      // this container's own hooks into __oi_alias_registry_<index> (see
+      // emitAliasRegistries) - `reconstruct` itself (the container's own
+      // toml text) is responsible for calling them and deciding what a
+      // lookupAlias() miss means (today: always a cycle, so always an
+      // error - see e.g. shrd_ptr_type.toml).
+      std::string key = info.typeName + "|" +
+                        resolveTypeName(cont->templateParams[0].type());
+      auto it = aliasRegistryIndices_.find(key);
+      if (it == aliasRegistryIndices_.end()) {
+        // Should be unreachable: emitAliasRegistries walks the exact same
+        // typeGraph.finalTypes this container was itself found in, using
+        // the same key, before any member is reconstructed.
+        throw std::runtime_error(
+            "CodeGen::emitReconstructValue: " + info.typeName +
+            " needs an alias registry but none was declared for pointee " +
+            resolveTypeName(cont->templateParams[0].type()));
+      }
+      const std::string registryVar =
+          "__oi_alias_registry_" + std::to_string(it->second);
+      code += "  uint64_t address = " + v + "_addr;\n";
+      code += "  auto registerAlias = [&](" + resolveTypeName(*cont) +
+              " value) {\n";
+      code += "    " + registryVar + "[address] = value;\n";
+      code += "    return value;\n";
+      code += "  };\n";
+      code += "  auto lookupAlias = [&]() -> std::optional<" +
+              resolveTypeName(*cont) + "> {\n";
+      code += "    auto __oi_it = " + registryVar + ".find(address);\n";
+      code += "    if (__oi_it == " + registryVar + ".end()) return "
+              "std::nullopt;\n";
+      code += "    return __oi_it->second;\n";
+      code += "  };\n";
+    } else {
+      // No registry for this container kind (std::unique_ptr - can't
+      // alias by construction), so a repeated non-null address can only
+      // mean a cycle - always an error.
+      code += "  if (!present && " + v + "_addr != 0) {\n";
+      code += "    throw std::runtime_error(\"oi::reconstruct: " +
+              info.typeName +
+              " - a cycle detected (a captured pointer address was "
+              "reused) - not yet supported\");\n";
+      code += "  }\n";
+    }
 
     // Recurse for the pointee type - its own decode statements land
     // inside pointeeVal()'s lambda body, its own fresh C++ scope. Sum's
@@ -2027,7 +2115,8 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
   return resultVar;
 }
 
-void CodeGen::generateReconstructContainerBody(Container& container,
+void CodeGen::generateReconstructContainerBody(TypeGraph& typeGraph,
+                                               Container& container,
                                                const std::string& typeToHash,
                                                std::string& code) {
   if (container.templateParams.empty()) {
@@ -2068,6 +2157,7 @@ void CodeGen::generateReconstructContainerBody(Container& container,
 
   code += "extern \"C\" " + containerType + " " + typeToHash +
           "(std::span<const uint8_t> bytes) {\n";
+  emitAliasRegistries(typeGraph, code);
   code += "  using DB = int;\n";
   code += "  struct OIReconstructFakeCtx { using DataBuffer = DB; };\n";
   code += "  using Ctx = OIReconstructFakeCtx;\n";
@@ -2150,8 +2240,10 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
   code += "#include <oi/exporters/ParsedData.h>\n";
   code += "#include <oi/types/dy.h>\n";
   code += "#include <cstdint>\n";
+  code += "#include <optional>\n";
   code += "#include <span>\n";
   code += "#include <stdexcept>\n";
+  code += "#include <unordered_map>\n";
   code += "#include <vector>\n\n";
 
   if (container || cls) {
@@ -2223,9 +2315,9 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
     generateReconstructScalar(*primitive, typeToHash, code);
   } else if (cls) {
     generateReconstructClassPreamble(typeGraph, *cls, code);
-    generateReconstructClassBody(*cls, typeToHash, code);
+    generateReconstructClassBody(typeGraph, *cls, typeToHash, code);
   } else {
-    generateReconstructContainerBody(*container, typeToHash, code);
+    generateReconstructContainerBody(typeGraph, *container, typeToHash, code);
   }
 
   if (VLOG_IS_ON(3)) {
@@ -2275,9 +2367,9 @@ void CodeGen::appendReconstructFunctionBody(TypeGraph& typeGraph,
   if (primitive) {
     generateReconstructScalar(*primitive, typeToHash, code);
   } else if (cls) {
-    generateReconstructClassBody(*cls, typeToHash, code);
+    generateReconstructClassBody(typeGraph, *cls, typeToHash, code);
   } else {
-    generateReconstructContainerBody(*container, typeToHash, code);
+    generateReconstructContainerBody(typeGraph, *container, typeToHash, code);
   }
 
   if (VLOG_IS_ON(3)) {

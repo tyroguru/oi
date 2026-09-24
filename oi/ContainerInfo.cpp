@@ -335,6 +335,10 @@ ContainerInfo::ContainerInfo(const fs::path& path) {
           codegenToml["reconstruct_kind"].value<std::string>()) {
     codegen.reconstructKind = std::move(*str);
   }
+  if (std::optional<bool> b =
+          codegenToml["reconstruct_uses_alias_registry"].value<bool>()) {
+    codegen.reconstructUsesAliasRegistry = *b;
+  }
   if (std::optional<std::string> str =
           codegenToml["extra"].value<std::string>()) {
     codegen.extra = std::move(*str);

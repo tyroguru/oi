@@ -77,19 +77,36 @@ struct ContainerInfo {
      *   std::shared_ptr - std::weak_ptr and raw pointers share the same
      *   underlying wire shape but aren't wired up to this calling
      *   convention yet, see docs/object-capture-initial-thoughts.md).
-     *   `present` (a bool - whether the pointee was captured) and
+     *   `present` (a bool - whether the pointee was captured) is always in
+     *   scope. If `reconstructUsesAliasRegistry` (below) is false,
      *   `pointeeVal()` (decodes and returns the pointee, of type T0 - must
-     *   be called at most once, and only when `present` is true) are in
-     *   scope. No aliasing/cycle support: the generated code throws
-     *   std::runtime_error if it ever decodes a non-null pointer whose
-     *   address was already seen elsewhere in the same object (aliasing,
-     *   for a type like std::shared_ptr that allows it, or a cycle's
-     *   back-edge, for any pointer-shaped type) - correct today only
-     *   because every "pointer"-kind container reconstructed so far
-     *   either can't alias by construction (std::unique_ptr) or the test
-     *   coverage doesn't yet exercise a case that does.
+     *   be called at most once, and only when `present` is true) is in
+     *   scope, and the generated code throws std::runtime_error before
+     *   `reconstruct` even runs if it ever decodes a non-null pointer
+     *   whose address was already seen elsewhere (aliasing or a cycle) -
+     *   correct only because a container like std::unique_ptr can't alias
+     *   by construction. If `reconstructUsesAliasRegistry` is true,
+     *   `pointeeVal()`, `registerAlias(value)` (stores `value` - of type
+     *   T0's owning container, e.g. shared_ptr<T0> - keyed by the
+     *   captured address, and returns it unchanged, for chaining into a
+     *   `return`) and `lookupAlias()` (returns
+     *   std::optional<container-of-T0>: a previously-registered value for
+     *   this address, or std::nullopt) are in scope instead - `reconstruct`
+     *   itself is then responsible for calling `registerAlias` on every
+     *   freshly-constructed present value and consulting `lookupAlias`
+     *   otherwise, including deciding what to do (typically throw) if
+     *   `lookupAlias` comes back empty, which still means a cycle: address
+     *   already seen (non-null, not present) but not yet finished.
      */
     std::string reconstructKind = "";
+    /*
+     * Opts a "pointer"-kind container into real aliasing support (see
+     * `reconstructKind`'s doc above) - true for std::shared_ptr, false
+     * (the default) for std::unique_ptr, which can't alias by
+     * construction and so doesn't need a registry at all. Ignored for any
+     * other `reconstructKind`.
+     */
+    bool reconstructUsesAliasRegistry = false;
     std::vector<Processor> processors{};
   };
 
