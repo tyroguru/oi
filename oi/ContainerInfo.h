@@ -73,15 +73,21 @@ struct ContainerInfo {
      *   `length` and `nextEntry()` (decodes and returns the next entry as
      *   a std::pair<T0, T1> - key first, value second) are in scope.
      *
-     *   "pointer" - a single, possibly-absent owned value (std::unique_ptr
-     *   today - std::shared_ptr/std::weak_ptr and raw pointers share the
-     *   same underlying wire shape but aren't wired up to this calling
+     *   "pointer" - a single, possibly-absent owned value (std::unique_ptr,
+     *   std::shared_ptr - std::weak_ptr and raw pointers share the same
+     *   underlying wire shape but aren't wired up to this calling
      *   convention yet, see docs/object-capture-initial-thoughts.md).
      *   `present` (a bool - whether the pointee was captured) and
      *   `pointeeVal()` (decodes and returns the pointee, of type T0 - must
      *   be called at most once, and only when `present` is true) are in
-     *   scope. No aliasing/cycle support: assumes sole ownership of the
-     *   pointee, true for unique_ptr by construction.
+     *   scope. No aliasing/cycle support: the generated code throws
+     *   std::runtime_error if it ever decodes a non-null pointer whose
+     *   address was already seen elsewhere in the same object (aliasing,
+     *   for a type like std::shared_ptr that allows it, or a cycle's
+     *   back-edge, for any pointer-shaped type) - correct today only
+     *   because every "pointer"-kind container reconstructed so far
+     *   either can't alias by construction (std::unique_ptr) or the test
+     *   coverage doesn't yet exercise a case that does.
      */
     std::string reconstructKind = "";
     std::vector<Processor> processors{};

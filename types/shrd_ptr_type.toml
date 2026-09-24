@@ -50,6 +50,23 @@ if constexpr (!oi_is_complete<T0>) {
 }
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# calling convention. Unlike std::unique_ptr, std::shared_ptr genuinely
+# allows aliasing (multiple shared_ptrs to the same object) - the shared
+# "pointer"-kind codegen throws a clear error if it ever detects that,
+# rather than silently reconstructing an independent copy. Only a
+# non-aliased shared_ptr (every captured instance owns a pointee no other
+# captured pointer also points at) round-trips correctly today.
+reconstruct_kind = "pointer"
+reconstruct = """
+if (present) {
+  return std::make_shared<T0>(pointeeVal());
+}
+return %1%<T0>{};
+"""
+
 [[codegen.processor]]
 type = "types::st::VarInt<DB>"
 func = """
