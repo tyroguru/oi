@@ -15,10 +15,12 @@ flat byte stream on disk - so a matching printout on both sides demonstrates
 the round trip actually works. `DemoObject` (defined in `ReconstructDemo.cpp`)
 covers every member kind reconstruction currently supports: a nested-enum
 member, a scalar, a `std::string`, a `std::vector<int32_t>`, a
-`std::map<std::string, int32_t>`, and a trivially-copyable C-style union
+`std::map<std::string, int32_t>`, a trivially-copyable C-style union
 (`IPv4Address` - the classic "same 4 bytes as either one `uint32_t` or 4
 octets" trick, populated with `8.8.8.8` so the reconstructed value is
-immediately recognizable).
+immediately recognizable), and a nested (non-union) struct (`Version{major,
+minor, patch}`, populated with `2.1.0`) - reconstructed recursively,
+member-by-member, the same way `DemoObject` itself is.
 
 Only `--transport local` is implemented today. `--transport remote` is
 accepted on the command line but rejected at runtime - it's a placeholder for
@@ -105,14 +107,15 @@ client: original object:
   scores = [10, 20, 30, 40, 50]
   attributes = {alpha: 1, beta: 2, gamma: 3}
   address = 8.8.8.8 (same bytes as raw=0x8080808)
-client: captured 193 bytes, sending via transport=local
+  version = 2.1.0
+client: captured 205 bytes, sending via transport=local
 client: done
 ```
 
 Within 5 seconds, the server's next poll picks up the file and finishes:
 
 ```
-server: received 193 bytes, reconstructing...
+server: received 205 bytes, reconstructing...
 server: reconstructed object:
   status = ACTIVE
   id = 42
@@ -120,6 +123,7 @@ server: reconstructed object:
   scores = [10, 20, 30, 40, 50]
   attributes = {alpha: 1, beta: 2, gamma: 3}
   address = 8.8.8.8 (same bytes as raw=0x8080808)
+  version = 2.1.0
 ```
 
 The two printouts matching, despite the server process never having touched
@@ -157,5 +161,5 @@ transport:
   reconstruction.
 - **Not every member type is reconstructable yet.** `DemoObject` deliberately
   sticks to what's supported today (enum, scalar, string, vector, map,
-  trivially-copyable union). Nested class/struct members and pointer members
+  trivially-copyable union, nested non-union struct). Pointer members
   aren't yet.
