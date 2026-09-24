@@ -104,12 +104,13 @@ struct ContactInfo {
 // Deliberately covers every member kind reconstruction supports today - a
 // nested-enum member, a scalar, a string, a vector, a map (including a
 // container-typed map key), a trivially-copyable union, a nested
-// (non-union) struct, and a std::unique_ptr to a nested struct - so this
-// one object exercises the full, currently-supported surface. Deliberately
-// does NOT include a raw pointer, std::shared_ptr, or std::weak_ptr
-// member - none of those are supported by reconstruction yet (see
-// docs/object-capture-initial-thoughts.md's "remaining reconstruction
-// gaps").
+// (non-union) struct, a std::unique_ptr to a nested struct, and a
+// non-aliased std::shared_ptr to a scalar - so this one object exercises
+// the full, currently-supported surface. Deliberately does NOT include a
+// raw pointer or std::weak_ptr member, nor a std::shared_ptr that aliases
+// another pointer to the same object - none of those are supported by
+// reconstruction yet (see docs/object-capture-initial-thoughts.md's
+// "remaining reconstruction gaps").
 struct DemoObject {
   struct Status {
     enum Enum { PENDING, ACTIVE, DONE };
@@ -123,6 +124,7 @@ struct DemoObject {
   IPv4Address address;
   Version version;
   std::unique_ptr<ContactInfo> contact;
+  std::shared_ptr<std::int32_t> priority;
 };
 
 const char* statusName(DemoObject::Status::Enum status) {
@@ -177,6 +179,13 @@ void printDemoObject(const DemoObject& object, std::ostream& os) {
   } else {
     os << "(none)\n";
   }
+
+  os << "  priority = ";
+  if (object.priority) {
+    os << *object.priority << '\n';
+  } else {
+    os << "(none)\n";
+  }
 }
 
 DemoObject buildDemoObject() {
@@ -190,6 +199,7 @@ DemoObject buildDemoObject() {
       .version = Version{.major = 2, .minor = 1, .patch = 0},
       .contact = std::make_unique<ContactInfo>(
           ContactInfo{.email = "support@example.com", .extension = 4242}),
+      .priority = std::make_shared<std::int32_t>(5),
   };
 }
 
