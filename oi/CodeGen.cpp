@@ -1568,18 +1568,35 @@ void CodeGen::emitReconstructTypeHandlerSupport(TypeGraph& typeGraph,
 
 // Research groundwork for byte-accurate object capture/reconstruction (see
 // docs/object-capture-initial-thoughts.md, not part of this repo) -
-// declares one std::unordered_map<uint64_t, ContainerType> per distinct
-// (container-type-name, pointee-type-name) pair reachable from this root
-// whose ContainerInfo opts into aliasing support (currently just
-// std::shared_ptr - see ContainerInfo.h's reconstructUsesAliasRegistry
-// doc), at the very top of the reconstruct function body - before any
-// member decoding, so every nested `[&]`-capturing lambda
-// emitReconstructValue's "pointer" branch later generates (however deeply
-// nested) can already see it by ordinary reference-capture, with no
-// explicit threading needed. Keyed by name rather than by Container node
-// identity: the same std::shared_ptr<Widget> instantiation can appear as
-// more than one Container node in the type graph (e.g. two separate
-// member fields), and all of them must resolve to the *same* registry for
+// declares one std::unordered_map<uint64_t, ValueType> per distinct alias
+// key reachable from this root, at the very top of the reconstruct
+// function body - before any member decoding, so every nested
+// `[&]`-capturing lambda emitReconstructValue's "pointer" branch (or
+// emitReconstructPointerValue, for a raw pointer/reference) later
+// generates (however deeply nested) can already see it by ordinary
+// reference-capture, with no explicit threading needed.
+//
+// Two independent sources of alias-eligible types, each with their own key
+// prefix (so a std::shared_ptr<Widget> registry and a raw Widget* registry
+// - genuinely different allocations, even for the same pointee type - can
+// never collide):
+//   - A Container whose ContainerInfo opts into aliasing support
+//     (currently just std::shared_ptr - see ContainerInfo.h's
+//     reconstructUsesAliasRegistry doc), keyed by
+//     "<container-type-name>|<pointee-type-name>", storing the container
+//     type itself (e.g. shared_ptr<Widget>) - aliasing means sharing a
+//     copy of that owning handle.
+//   - Any Pointer or Reference node (a raw pointer or chased reference -
+//     see the "reference vs pointer" doc above) - *always* alias-eligible,
+//     no opt-in needed, since an ordinary raw pointer can always alias by
+//     construction (unlike std::unique_ptr) - keyed by
+//     "raw-pointer|<pointee-type-name>", storing a plain pointee* -
+//     aliasing means handing out the same already-allocated address.
+//
+// Keyed by name rather than by node identity in both cases: the same
+// pointee type can be reached via more than one distinct Container/
+// Pointer/Reference node in the type graph (e.g. two separate member
+// fields), and all of them must resolve to the *same* registry for
 // aliasing between them to be detected at all.
 //
 // Repopulates aliasRegistryIndices_ from scratch each call - this and
@@ -1590,21 +1607,34 @@ void CodeGen::emitReconstructTypeHandlerSupport(TypeGraph& typeGraph,
 void CodeGen::emitAliasRegistries(TypeGraph& typeGraph, std::string& code) {
   aliasRegistryIndices_.clear();
   for (Type& t : typeGraph.finalTypes) {
-    auto* cont = dynamic_cast<Container*>(&t);
-    if (!cont || !cont->containerInfo_.codegen.reconstructUsesAliasRegistry ||
-        cont->templateParams.empty()) {
+    std::string key;
+    std::string valueTypeName;
+
+    if (auto* cont = dynamic_cast<Container*>(&t)) {
+      if (!cont->containerInfo_.codegen.reconstructUsesAliasRegistry ||
+          cont->templateParams.empty()) {
+        continue;
+      }
+      key = cont->containerInfo_.typeName + "|" +
+            resolveTypeName(cont->templateParams[0].type());
+      valueTypeName = resolveTypeName(*cont);
+    } else if (auto* ptr = dynamic_cast<Pointer*>(&t)) {
+      key = "raw-pointer|" + resolveTypeName(ptr->pointeeType());
+      valueTypeName = resolveTypeName(ptr->pointeeType()) + "*";
+    } else if (auto* ref = dynamic_cast<Reference*>(&t)) {
+      key = "raw-pointer|" + resolveTypeName(ref->pointeeType());
+      valueTypeName = resolveTypeName(ref->pointeeType()) + "*";
+    } else {
       continue;
     }
 
-    std::string key = cont->containerInfo_.typeName + "|" +
-                      resolveTypeName(cont->templateParams[0].type());
     if (aliasRegistryIndices_.contains(key)) {
       continue;
     }
 
     size_t index = aliasRegistryIndices_.size();
     aliasRegistryIndices_.emplace(std::move(key), index);
-    code += "  std::unordered_map<uint64_t, " + resolveTypeName(*cont) +
+    code += "  std::unordered_map<uint64_t, " + valueTypeName +
             "> __oi_alias_registry_" + std::to_string(index) + ";\n";
   }
 }
@@ -1792,10 +1822,19 @@ std::string CodeGen::emitReconstructClassValue(Class& cls,
 // bare names a container's own toml text needs) since this isn't wrapped
 // in its own lambda scope the way a container's kind-specific branch is.
 //
-// No aliasing/cycle support yet (see ContainerInfo.h's
-// reconstructUsesAliasRegistry doc for the equivalent, already-built
-// container-side mechanism) - a repeated non-null address is always an
-// error, exactly like std::unique_ptr's own non-registry guard.
+// Aliasing, always on (unlike a container, which opts in via
+// reconstructUsesAliasRegistry): an ordinary raw pointer can always alias
+// another one to the same object, unlike e.g. std::unique_ptr, so there's
+// no non-aliasing case worth keeping separately. Uses the same
+// __oi_alias_registry_N mechanism emitAliasRegistries declares for
+// alias-eligible containers, just with its own "raw-pointer|..." key
+// namespace and a plain `Pointee*` (not an owning container type) as the
+// registry's value type - see emitAliasRegistries' own doc for why. A
+// lookup miss on a non-null, not-present address still means a cycle (the
+// address was seen, via the write side's own ctx.pointers.add dedup, but
+// nothing has *finished* reconstructing it yet) - not yet supported,
+// same as before, just now only for the genuinely unresolvable case
+// rather than for every repeat.
 //
 // Ownership: unlike std::unique_ptr/std::shared_ptr, a raw pointer's type
 // carries no destruction machinery at all - there is no hook to ever run
@@ -1818,12 +1857,18 @@ std::string CodeGen::emitReconstructPointerValue(Type& pointeeType,
   code += "  bool " + v + "_present = " + v + "_sum.index == 1;\n";
 
   const std::string pointeeTypeName = resolveTypeName(pointeeType);
-  code += "  if (!" + v + "_present && " + v + "_addr != 0) {\n";
-  code += "    throw std::runtime_error(\"oi::reconstruct: " +
-          pointeeTypeName +
-          "* - a cycle detected (a captured pointer address was reused) "
-          "- not yet supported\");\n";
-  code += "  }\n";
+  const std::string key = "raw-pointer|" + pointeeTypeName;
+  auto it = aliasRegistryIndices_.find(key);
+  if (it == aliasRegistryIndices_.end()) {
+    // Should be unreachable: emitAliasRegistries walks the exact same
+    // typeGraph.finalTypes this Pointer/Reference node was itself found
+    // in, using the same key, before any member is reconstructed.
+    throw std::runtime_error(
+        "CodeGen::emitReconstructPointerValue: no alias registry declared "
+        "for pointee " + pointeeTypeName);
+  }
+  const std::string registryVar =
+      "__oi_alias_registry_" + std::to_string(it->second);
 
   const std::string resultVar = v + "_result";
   code += "  " + pointeeTypeName + "* " + resultVar + " = nullptr;\n";
@@ -1835,6 +1880,18 @@ std::string CodeGen::emitReconstructPointerValue(Type& pointeeType,
   code += pointeeCode;
   code += "    " + resultVar + " = new " + pointeeTypeName + "(" +
           pointeeExpr + ");\n";
+  code += "    " + registryVar + "[" + v + "_addr] = " + resultVar + ";\n";
+  code += "  } else if (" + v + "_addr != 0) {\n";
+  code += "    auto " + v + "_alias_it = " + registryVar + ".find(" + v +
+          "_addr);\n";
+  code += "    if (" + v + "_alias_it == " + registryVar + ".end()) {\n";
+  code += "      throw std::runtime_error(\"oi::reconstruct: " +
+          pointeeTypeName +
+          "* - a cycle detected (a captured pointer address was reused "
+          "but nothing has finished reconstructing it yet) - not yet "
+          "supported\");\n";
+  code += "    }\n";
+  code += "    " + resultVar + " = " + v + "_alias_it->second;\n";
   code += "  }\n";
   return resultVar;
 }
