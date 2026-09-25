@@ -1,5 +1,19 @@
 # reconstruct_demo
 
+This directory holds three demos, in the order they were built:
+
+- **`reconstruct_demo`** (below): a two-process demo proving byte-accurate
+  capture and reconstruction of a non-cyclic object with a broad mix of
+  member kinds, including real `std::shared_ptr` aliasing.
+- **`cycle_breaking_demo`**: proves BreakCycles lets a genuinely
+  self-referential, cyclic raw-pointer structure be *introspected* at all
+  (`facebookexperimental/object-introspection#293` stage 3) - introspect-only,
+  see its own header comment for why.
+- **`cyclic_reconstruct_demo`**: the follow-up - proves such a structure can
+  also be *reconstructed*, both when the cycle closes onto a non-root
+  ancestor (succeeds, real values) and when it closes onto the
+  reconstruction root itself (cleanly rejected) - see its own header comment.
+
 A two-process demo proving byte-accurate object capture on one process and
 reconstruction on another: one executable, two modes.
 
@@ -214,16 +228,17 @@ transport:
   considered this pointer "owning" in the first place. Heap-allocating and
   never freeing is the only defensible default given that constraint - see
   `CodeGen::emitReconstructPointerValue`'s own comment.
-- **Aliasing works, but only for non-self-referential pointees.** A
-  genuine *cycle* (e.g. a linked-list node whose own type contains a
-  pointer back to itself, `std::shared_ptr` or raw) isn't reconstructable,
-  and isn't even capturable today: OI's static type system can't
-  represent a self-referential type reachable via genuine pointer-chasing
-  at all - a pre-existing, upstream-tracked limitation
-  (`facebookexperimental/object-introspection#293`) that applies equally
-  to raw pointers and `std::shared_ptr`, not something this demo or
-  reconstruction specifically can fix (though it's this project's to fix,
-  since there's no one else who will - see
-  docs/object-capture-initial-thoughts.md, not part of this repo).
-  `priority`/`priorityAlias` and `location` are all safe here only because
-  their pointee types aren't self-referential.
+- **`DemoObject` itself still has no self-referential member.** Genuine
+  cycles (a raw pointer, since `chase-raw-pointers` is the only edge kind
+  BreakCycles currently rewrites) are now both capturable and
+  reconstructable - see `cyclic_reconstruct_demo` above, and
+  `docs/object-capture-initial-thoughts.md` (not part of this repo) - but
+  reconstructing a cycle that closes directly onto the literal
+  `oi::reconstruct<T>()` root is still deliberately rejected with a clear
+  error rather than attempted: `T` is returned by value, so a self-pointer
+  into that value can't be represented until a caller-owns-the-storage
+  entry point (a planned `oi::reconstructInto<T>(T&, bytes)`) exists.
+  `priority`/`priorityAlias` and `location` are safe here specifically
+  because their pointee types aren't self-referential - that was a
+  simplification of this particular demo, not a limitation of aliasing
+  itself.

@@ -135,6 +135,17 @@ class CodeGen {
                                         const std::string& parsedDataExpr,
                                         size_t& idCounter,
                                         std::string& code);
+  void emitReconstructClassValueInto(type_graph::Class& cls,
+                                     const std::string& storagePtrExpr,
+                                     const std::string& parsedDataExpr,
+                                     size_t& idCounter,
+                                     std::string& code);
+  void collectReconstructFieldExprs(type_graph::Class& cls,
+                                    const std::string& parsedDataExpr,
+                                    size_t& idCounter,
+                                    std::string& code,
+                                    std::vector<std::string>& namesOut,
+                                    std::vector<std::string>& fieldExprsOut);
   void generateReconstructContainerBody(type_graph::TypeGraph& typeGraph,
                                         type_graph::Container& container,
                                         const std::string& typeToHash,
@@ -149,8 +160,8 @@ class CodeGen {
                                           std::string& code);
   void emitReconstructTypeHandlerSupport(type_graph::TypeGraph& typeGraph,
                                          std::string& code);
-  void emitAliasRegistries(type_graph::TypeGraph& typeGraph,
-                           std::string& code);
+  void emitAliasRegistries(type_graph::TypeGraph& typeGraph, std::string& code);
+  const std::string& getOrEmitCycleReconstructHelper(type_graph::Class& cls);
 
   type_graph::TypeGraph typeGraph_;
   const OICodeGenConfig& config_;
@@ -168,6 +179,32 @@ class CodeGen {
   // which one to reference for a given container instance without needing
   // that index threaded through every function's parameters.
   std::unordered_map<std::string, size_t> aliasRegistryIndices_;
+  // Also populated fresh by emitAliasRegistries for each reconstruct-
+  // generation call - every Class that appears as *some* CycleBreaker's
+  // underlying type anywhere in the graph (see BreakCycles), regardless of
+  // which specific edge(s) BreakCycles actually rewrote to reach it. This
+  // has to be a type-wide property, not a per-edge one: a Class capable of
+  // closing a cycle through *one* of its own members might be reached
+  // elsewhere in the same graph via a perfectly ordinary edge that
+  // BreakCycles never touched (e.g. the very first edge that reaches it,
+  // before it's "on path") - that instance still needs to register its own
+  // address before its fields are decoded, since some *other* edge further
+  // down the same recursion may still refer back to it.
+  std::unordered_set<const type_graph::Class*> cycleCapableClasses_;
+  // getOrEmitCycleReconstructHelper's cache: a cycle-capable Class's own
+  // field-decode logic (emitReconstructClassValueInto) must be generated
+  // exactly once, as a named, reusable function, rather than re-expanded
+  // inline every time some edge reaches it - the type graph has no notion
+  // of recursion depth, so naively inlining it at every reference recurses
+  // this codegen itself unboundedly (this project's own code hitting the
+  // same class of problem #293 was originally about, just one remove
+  // further). Keyed and populated the same way cycleCapableClasses_ is
+  // (fresh per reconstruct-generation call) - see
+  // getOrEmitCycleReconstructHelper's own doc for the full mechanism.
+  std::unordered_map<const type_graph::Class*, std::string>
+      cycleReconstructHelperNames_;
+  std::string cycleReconstructHelpersCode_;
+  size_t cycleReconstructHelperCounter_ = 0;
 
   bool codegenFromDrgn(struct drgn_type* drgnType,
                        std::string& code,
