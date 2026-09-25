@@ -32,7 +32,12 @@ address→object registry resolves a repeated captured pointer address to
 one shared instance rather than reconstructing a second, independent
 copy. This only works because the pointee (a plain `int32_t`) isn't
 self-referential - a genuine *cycle* still isn't supported (see "Known
-limitations" below).
+limitations" below) - and a non-null raw pointer to a nested struct
+(`Location* location`, populated with the Statue of Liberty's
+coordinates), heap-allocated fresh on the reconstructing side and
+**deliberately never freed** (a raw pointer carries no destruction
+machinery to hook into, unlike `std::unique_ptr`/`std::shared_ptr` -
+see "Known limitations").
 
 Only `--transport local` is implemented today. `--transport remote` is
 accepted on the command line but rejected at runtime - it's a placeholder for
@@ -72,9 +77,13 @@ The build has two steps under the hood, wired up in this directory's
 2. The in-tree `oilgen` tool parses that same source file and generates the
    missing `introspectImpl<DemoObject>`/`reconstructImpl<DemoObject>`
    definitions, using a config generated specifically for this target (via
-   `tools/config_gen.py`) with the `capture-bytes` feature enabled - this is
-   the one thing this target's config needs that the project's general test
-   config doesn't turn on by default.
+   `tools/config_gen.py`) with the `capture-bytes` and `chase-raw-pointers`
+   features enabled - the two things this target's config needs that the
+   project's general test config doesn't turn on by default.
+   `chase-raw-pointers` is only safe to enable unconditionally here because
+   `DemoObject` has no self-referential types - see
+   `PrependCaptureBytesFeature.cmake` for why this isn't a project-wide
+   default.
 
 Both are then linked together against `liboil.so` into one executable at
 `build/examples/reconstruct-demo/bin/reconstruct_demo`.
@@ -123,14 +132,15 @@ client: original object:
   contact = support@example.com x4242
   priority = 5
   priorityAlias = 5 (same object as priority: true, use_count=2)
-client: captured 260 bytes, sending via transport=local
+  location = 40.6892, -74.0445
+client: captured 284 bytes, sending via transport=local
 client: done
 ```
 
 Within 5 seconds, the server's next poll picks up the file and finishes:
 
 ```
-server: received 260 bytes, reconstructing...
+server: received 284 bytes, reconstructing...
 server: reconstructed object:
   status = ACTIVE
   id = 42
@@ -142,6 +152,7 @@ server: reconstructed object:
   contact = support@example.com x4242
   priority = 5
   priorityAlias = 5 (same object as priority: true, use_count=2)
+  location = 40.6892, -74.0445
 ```
 
 The `priorityAlias` line matching `true`/`use_count=2` on the
@@ -149,7 +160,10 @@ reconstructed side is the interesting part: the server process never
 shared memory with the client, yet it correctly rebuilt `priority` and
 `priorityAlias` as two owners of one shared object, purely from the
 address information in the byte stream - not two independent copies
-that merely happen to hold equal values.
+that merely happen to hold equal values. The `location` line matching is
+the raw-pointer equivalent proof point: the server allocates a brand-new
+`Location` on its own heap and fills it purely from captured bytes, with
+no memory shared with the client at all.
 
 The two printouts matching, despite the server process never having touched
 the client's memory, is the whole demo.
@@ -187,13 +201,29 @@ transport:
 - **Not every member type is reconstructable yet.** `DemoObject` deliberately
   sticks to what's supported today (enum, scalar, string, vector, map,
   trivially-copyable union, nested non-union struct, `std::unique_ptr`,
-  aliased `std::shared_ptr`). Raw pointers and `std::weak_ptr` aren't yet.
+  aliased `std::shared_ptr`, non-aliased raw pointer). `std::weak_ptr`
+  isn't yet, and neither is an *aliased* raw pointer (two raw pointers to
+  the same object) - that throws a clear error rather than reconstructing
+  wrong data, the same as an aliased `std::shared_ptr` would before its
+  own registry support landed.
+- **`location` is heap-allocated and deliberately never freed.** Unlike
+  `std::unique_ptr`/`std::shared_ptr` (which have no leak problem at all -
+  the reconstructed smart pointer's own destructor handles cleanup
+  normally), a raw pointer carries no destruction machinery, and
+  reconstruction has no way to know whether the original program even
+  considered this pointer "owning" in the first place. Heap-allocating and
+  never freeing is the only defensible default given that constraint - see
+  `CodeGen::emitReconstructPointerValue`'s own comment.
 - **Aliasing works, but only for non-self-referential pointees.** A
   genuine *cycle* (e.g. a linked-list node whose own type contains a
-  `std::shared_ptr` back to itself) isn't reconstructable, and isn't even
-  capturable today: OI's static type system can't represent a
-  self-referential type at all (a pre-existing, upstream-tracked
-  limitation - `facebookexperimental/object-introspection#293` - not
-  something this demo or reconstruction specifically can fix). `priority`/
-  `priorityAlias` alias each other safely here only because their pointee,
-  a plain `int32_t`, isn't self-referential.
+  pointer back to itself, `std::shared_ptr` or raw) isn't reconstructable,
+  and isn't even capturable today: OI's static type system can't
+  represent a self-referential type reachable via genuine pointer-chasing
+  at all - a pre-existing, upstream-tracked limitation
+  (`facebookexperimental/object-introspection#293`) that applies equally
+  to raw pointers and `std::shared_ptr`, not something this demo or
+  reconstruction specifically can fix (though it's this project's to fix,
+  since there's no one else who will - see
+  docs/object-capture-initial-thoughts.md, not part of this repo).
+  `priority`/`priorityAlias` and `location` are all safe here only because
+  their pointee types aren't self-referential.

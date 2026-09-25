@@ -96,6 +96,21 @@ struct ContactInfo {
   std::int32_t extension;
 };
 
+// A raw-pointer-owned nested struct - reconstructed via the same
+// Pair<VarInt, Sum<Unit, T>> decoding as std::unique_ptr/std::shared_ptr,
+// but hand-written in CodeGen.cpp rather than driven by a ContainerInfo
+// toml, since neither the Pointer nor Reference type-graph node (see
+// docs/object-capture-initial-thoughts.md, not part of this repo) is a
+// Container. Reconstructing this member specifically requires
+// chase-raw-pointers to be enabled for this target (see
+// PrependCaptureBytesFeature.cmake) - without it, a raw pointer member is
+// stubbed to an inert captured address instead of a real reconstructable
+// pointee.
+struct Location {
+  double latitude;
+  double longitude;
+};
+
 // External linkage required: DemoObject is a template argument to the weak
 // introspectImpl<T>/reconstructImpl<T> symbols oilgen fills in below (see
 // include/oi/oi.h) - a type declared in an anonymous namespace has no
@@ -104,18 +119,19 @@ struct ContactInfo {
 // Deliberately covers every member kind reconstruction supports today - a
 // nested-enum member, a scalar, a string, a vector, a map (including a
 // container-typed map key), a trivially-copyable union, a nested
-// (non-union) struct, a std::unique_ptr to a nested struct, and two
+// (non-union) struct, a std::unique_ptr to a nested struct, two
 // std::shared_ptr members that ALIAS each other (point at the same
-// underlying int) - so this one object exercises the full,
-// currently-supported surface, including real aliasing (see
+// underlying int), and a non-aliased raw pointer to a nested struct - so
+// this one object exercises the full, currently-supported surface,
+// including real aliasing (see
 // docs/object-capture-initial-thoughts.md's address->object registry
-// section: this only works because `priority`'s pointee type, a plain
-// int32_t, isn't self-referential - a genuine *cycle* still isn't
-// supported). Deliberately does NOT include a raw pointer, a
-// std::weak_ptr member, or anything self-referential - none of those are
-// supported by reconstruction yet (see
-// docs/object-capture-initial-thoughts.md's "remaining reconstruction
-// gaps").
+// section: this only works because `priority`'s and `location`'s pointee
+// types aren't self-referential - a genuine *cycle* still isn't
+// supported, and neither is a raw pointer that aliases another pointer to
+// the same object). Deliberately does NOT include a std::weak_ptr member
+// or anything self-referential - none of those are supported by
+// reconstruction yet (see docs/object-capture-initial-thoughts.md's
+// "remaining reconstruction gaps").
 struct DemoObject {
   struct Status {
     enum Enum { PENDING, ACTIVE, DONE };
@@ -131,6 +147,7 @@ struct DemoObject {
   std::unique_ptr<ContactInfo> contact;
   std::shared_ptr<std::int32_t> priority;
   std::shared_ptr<std::int32_t> priorityAlias;  // SAME object as priority
+  Location* location;
 };
 
 const char* statusName(DemoObject::Status::Enum status) {
@@ -203,6 +220,14 @@ void printDemoObject(const DemoObject& object, std::ostream& os) {
   } else {
     os << "(none)\n";
   }
+
+  os << "  location = ";
+  if (object.location) {
+    os << object.location->latitude << ", " << object.location->longitude
+       << '\n';
+  } else {
+    os << "(none)\n";
+  }
 }
 
 DemoObject buildDemoObject() {
@@ -225,6 +250,13 @@ DemoObject buildDemoObject() {
           ContactInfo{.email = "support@example.com", .extension = 4242}),
       .priority = priority,
       .priorityAlias = priority,
+      // The Statue of Liberty - a fixed, human-recognizable landmark, so
+      // the reconstructed value is easy to eyeball for correctness. Never
+      // freed: matches reconstruction's own deliberate leak-by-design for
+      // raw pointer pointees (see docs/object-capture-initial-thoughts.md,
+      // not part of this repo) - a raw pointer carries no destruction
+      // machinery to mirror on either side of this round trip.
+      .location = new Location{.latitude = 40.6892, .longitude = -74.0445},
   };
 }
 
