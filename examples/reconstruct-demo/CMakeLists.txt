@@ -8,9 +8,11 @@
 # -DOIL_AOT_COMPILATION=1, then run the in-tree oilgen against the same
 # source to generate the missing introspectImpl<T>/reconstructImpl<T>
 # definitions, then link both object files plus liboil), except this
-# target's config additionally enables the capture-bytes feature, which
-# reconstruction depends on and the shared test/oilgen config doesn't
-# enable.
+# target's config additionally enables the capture-bytes and
+# chase-raw-pointers features, which reconstruction depends on and the
+# shared test/oilgen config doesn't enable (see
+# PrependCaptureBytesFeature.cmake for why chase-raw-pointers is safe to
+# turn on here specifically, not as a project-wide default).
 #
 
 set(RECONSTRUCT_DEMO_BASE_CONFIG_PATH
@@ -39,7 +41,7 @@ add_custom_command(
   WORKING_DIRECTORY
     "${PROJECT_SOURCE_DIR}"
   COMMENT
-    "Generating reconstruct_demo oilgen config (capture-bytes enabled)"
+    "Generating reconstruct_demo oilgen config (capture-bytes, chase-raw-pointers enabled)"
   VERBATIM
 )
 
