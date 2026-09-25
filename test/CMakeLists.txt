@@ -39,6 +39,7 @@ add_executable(test_type_graph
   test_add_children.cpp
   test_add_padding.cpp
   test_alignment_calc.cpp
+  test_break_cycles.cpp
   test_codegen.cpp
   test_drgn_parser.cpp
   test_enforce_compatibility.cpp
