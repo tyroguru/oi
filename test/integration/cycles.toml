@@ -23,7 +23,6 @@ definitions = '''
 '''
 [cases]
   [cases.raw_ptr]
-    oil_skip = "cycles are broken" # https://github.com/facebookexperimental/object-introspection/issues/293
     param_types = ["RawNode*"]
     setup = '''
       RawNode *first  = new RawNode{1, nullptr};
@@ -35,60 +34,29 @@ definitions = '''
       return first;
     '''
     features = ["chase-raw-pointers"]
+    # BreakCycles (#293 stage 3) wraps the type-level self-reference in a
+    # CycleBreaker as soon as it's reached - here that's on the very first
+    # `next` edge, since RawNode's own member type is the root type itself.
+    # The CycleBreaker boundary gives an honest, empty capture (no further
+    # members) rather than the full 3-real-object chain the setup builds;
+    # see CodeGen::genCycleBreakerTypeHandler for why capture can't safely
+    # continue through that edge.
     expect_json = '''
     [
       {
         "typeName": "ns_cycles::RawNode",
         "staticSize": 16,
-        "dynamicSize": 32,
         "members": [
           {
+            "name": "value",
             "typeName": "int32_t",
-            "staticSize": 4,
-            "dynamicSize": 0
+            "staticSize": 4
           },
           {
+            "name": "next",
             "typeName": "ns_cycles::RawNode*",
             "staticSize": 8,
-            "dynamicSize": 32,
-            "members": [
-              {
-                "typeName": "ns_cycles::RawNode",
-                "staticSize": 16,
-                "dynamicSize": 16,
-                "members": [
-                  {
-                    "typeName": "int32_t",
-                    "staticSize": 4,
-                    "dynamicSize": 0
-                  },
-                  {
-                    "typeName": "ns_cycles::RawNode*",
-                    "staticSize": 8,
-                    "dynamicSize": 16,
-                    "members": [
-                      {
-                        "typeName": "ns_cycles::RawNode",
-                        "staticSize": 16,
-                        "dynamicSize": 0,
-                        "members": [
-                          {
-                            "typeName": "int32_t",
-                            "staticSize": 4,
-                            "dynamicSize": 0
-                          },
-                          {
-                            "typeName": "ns_cycles::RawNode*",
-                            "staticSize": 8,
-                            "dynamicSize": 0
-                          }
-                        ]
-                      }
-                    ]
-                  }
-                ]
-              }
-            ]
+            "members": []
           }
         ]
       }
@@ -96,7 +64,6 @@ definitions = '''
     '''
 
   [cases.raw_ptr_wrapped]
-    oil_skip = "cycles are broken" # https://github.com/facebookexperimental/object-introspection/issues/293
     param_types = ["Wrapper<RawNode*>&"]
     setup = '''
       RawNode *first  = new RawNode{1, nullptr};
@@ -108,49 +75,37 @@ definitions = '''
       return Wrapper<RawNode*>(first);
     '''
     features = ["chase-raw-pointers"]
+    # Here the root is Wrapper<RawNode*>, not RawNode itself, so the
+    # type-level self-reference (see the raw_ptr case above) isn't hit
+    # until one real pointer hop further in: t -> RawNode -> next. That
+    # `next` edge is where BreakCycles inserts the CycleBreaker, so capture
+    # continues one more level (into the pointee's own RawNode) before
+    # hitting the CycleBreaker's empty-members boundary.
     expect_json = '''[{
       "staticSize": 8,
-      "dynamicSize": 48,
       "members": [{
         "name": "t",
         "typeName": "ns_cycles::RawNode*",
         "staticSize": 8,
-        "dynamicSize": 48,
         "members": [{
           "typeName": "ns_cycles::RawNode",
           "staticSize": 16,
-          "dynamicSize": 32,
           "members": [
-            { "name": "value", "typeName": "int32_t", "staticSize": 4, "dynamicSize": 0 },
+            { "name": "value", "typeName": "int32_t", "staticSize": 4 },
             {
               "name": "next",
               "typeName": "ns_cycles::RawNode*",
               "staticSize": 8,
-              "dynamicSize": 32,
               "members": [{
                 "typeName": "ns_cycles::RawNode",
                 "staticSize": 16,
-                "dynamicSize": 16,
-                "members": [
-                  { "name": "value", "typeName": "int32_t", "staticSize": 4, "dynamicSize": 0 },
-                  {
-                    "name": "next",
-                    "typeName": "ns_cycles::RawNode*",
-                    "staticSize": 8,
-                    "dynamicSize": 16,
-                    "members": [{
-                      "typeName": "ns_cycles::RawNode",
-                      "staticSize": 16,
-                      "dynamicSize": 0,
-                      "members": [
-                        { "name": "value", "typeName": "int32_t", "staticSize": 4, "dynamicSize": 0 },
-                        {
-                          "name": "next",
-                          "typeName": "ns_cycles::RawNode*",
-                          "staticSize": 8,
-                          "dynamicSize": 0
-                        }
-    ]}]}]}]}]}]}]}]
+                "members": []
+              }]
+            }
+          ]
+        }]
+      }]
+    }]
     '''
 
   [cases.unique_ptr]

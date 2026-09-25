@@ -58,6 +58,7 @@ class DrgnExporter : public Visitor<drgn_type*> {
   drgn_type* visit(Dummy&) override;
   drgn_type* visit(DummyAllocator&) override;
   drgn_type* visit(CaptureKeys&) override;
+  drgn_type* visit(CycleBreaker&) override;
 
  private:
   drgn_type* makeDrgnType(enum drgn_type_kind kind,

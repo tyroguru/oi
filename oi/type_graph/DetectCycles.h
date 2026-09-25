@@ -57,6 +57,7 @@ class DetectCycles : public RecursiveVisitor {
   void accept(Type& type) override;
   void visit(Class& c) override;
   void visit(Container& c) override;
+  void visit(CycleBreaker&) override;
 
  private:
   void pushEdge(std::string description);

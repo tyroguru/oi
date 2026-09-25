@@ -117,3 +117,118 @@ set_target_properties(reconstruct_demo
   PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
 )
+
+#
+# cycle_breaking_demo: a standalone, introspect-only proof that BreakCycles
+# (facebookexperimental/object-introspection#293 stage 3) lets oilgen
+# generate working code for a genuinely self-referential, cyclic raw-pointer
+# structure (see CycleBreakingDemo.cpp's own header comment). Built the same
+# three-step way as reconstruct_demo above, but its own separate oilgen
+# invocation - it can never share a translation unit with reconstruct_demo's
+# introspect+reconstruct pair (oilgen only generates for one root per
+# invocation), and deliberately never calls oi::reconstruct() at all (see
+# CycleBreakingDemo.cpp for why).
+#
+
+set(CYCLE_BREAKING_DEMO_BASE_CONFIG_PATH
+  "${CMAKE_CURRENT_BINARY_DIR}/cycle-breaking-demo.oid.toml.base"
+)
+set(CYCLE_BREAKING_DEMO_CONFIG_PATH
+  "${CMAKE_CURRENT_BINARY_DIR}/cycle-breaking-demo.oid.toml"
+)
+
+add_custom_command(
+  OUTPUT "${CYCLE_BREAKING_DEMO_CONFIG_PATH}"
+  COMMAND
+    ${PYTHON}
+    "${PROJECT_SOURCE_DIR}/tools/config_gen.py"
+    --compiler "${CMAKE_CXX_COMPILER}"
+    "${CYCLE_BREAKING_DEMO_BASE_CONFIG_PATH}"
+  COMMAND
+    ${CMAKE_COMMAND}
+    "-DIN_FILE=${CYCLE_BREAKING_DEMO_BASE_CONFIG_PATH}"
+    "-DOUT_FILE=${CYCLE_BREAKING_DEMO_CONFIG_PATH}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/PrependChaseRawPointersFeature.cmake"
+  DEPENDS
+    "${PROJECT_SOURCE_DIR}/tools/config_gen.py"
+    "${PROJECT_SOURCE_DIR}/dev.oid.toml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PrependChaseRawPointersFeature.cmake"
+  WORKING_DIRECTORY
+    "${PROJECT_SOURCE_DIR}"
+  COMMENT
+    "Generating cycle_breaking_demo oilgen config (chase-raw-pointers enabled)"
+  VERBATIM
+)
+
+add_custom_target(cycle_breaking_demo_config
+  DEPENDS "${CYCLE_BREAKING_DEMO_CONFIG_PATH}"
+)
+
+# Step 1: compile the source normally.
+add_library(cycle_breaking_demo_obj OBJECT CycleBreakingDemo.cpp)
+
+target_include_directories(cycle_breaking_demo_obj
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+)
+
+target_compile_definitions(cycle_breaking_demo_obj
+  PRIVATE
+    OIL_AOT_COMPILATION=1
+)
+
+target_compile_features(cycle_breaking_demo_obj
+  PRIVATE
+    cxx_std_20
+)
+
+target_compile_options(cycle_breaking_demo_obj
+  PRIVATE
+    $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-g>
+)
+
+# Step 2: run oilgen against the *same* source to generate the missing
+# introspectImpl<RawNode> definition.
+set(CYCLE_BREAKING_DEMO_GENERATED_O
+  "${CMAKE_CURRENT_BINARY_DIR}/cycle_breaking_demo.introspection.o"
+)
+
+add_custom_command(
+  OUTPUT "${CYCLE_BREAKING_DEMO_GENERATED_O}"
+  COMMAND
+    $<TARGET_FILE:oilgen>
+    -p "${CMAKE_BINARY_DIR}"
+    "--config-file=${CYCLE_BREAKING_DEMO_CONFIG_PATH}"
+    "--output=${CYCLE_BREAKING_DEMO_GENERATED_O}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/CycleBreakingDemo.cpp"
+  DEPENDS
+    oilgen
+    cycle_breaking_demo_obj
+    cycle_breaking_demo_config
+    "${CMAKE_CURRENT_SOURCE_DIR}/CycleBreakingDemo.cpp"
+  COMMENT
+    "oilgen: generating AOT introspection code for CycleBreakingDemo.cpp"
+  VERBATIM
+)
+
+add_custom_target(cycle_breaking_demo_generated
+  DEPENDS "${CYCLE_BREAKING_DEMO_GENERATED_O}"
+)
+
+# Step 3: link both object files, plus the OIL runtime support library.
+add_executable(cycle_breaking_demo
+  $<TARGET_OBJECTS:cycle_breaking_demo_obj>
+  "${CYCLE_BREAKING_DEMO_GENERATED_O}"
+)
+
+add_dependencies(cycle_breaking_demo cycle_breaking_demo_generated)
+
+target_link_libraries(cycle_breaking_demo
+  PRIVATE
+    oil_shared
+)
+
+set_target_properties(cycle_breaking_demo
+  PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
+)

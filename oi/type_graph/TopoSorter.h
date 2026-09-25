@@ -49,6 +49,7 @@ class TopoSorter : public RecursiveVisitor {
   void visit(Reference& r) override;
   void visit(Primitive& p) override;
   void visit(CaptureKeys& p) override;
+  void visit(CycleBreaker& p) override;
   void visit(Incomplete& i) override;
   void visit(Array& i) override;
 

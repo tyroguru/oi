@@ -28,6 +28,7 @@
 #include "oi/Headers.h"
 #include "type_graph/AddPadding.h"
 #include "type_graph/AlignmentCalc.h"
+#include "type_graph/BreakCycles.h"
 #include "type_graph/DetectCycles.h"
 #include "type_graph/EnforceCompatibility.h"
 #include "type_graph/Flattener.h"
@@ -48,9 +49,11 @@ namespace oi::detail {
 
 using type_graph::AddPadding;
 using type_graph::AlignmentCalc;
+using type_graph::BreakCycles;
 using type_graph::CaptureKeys;
 using type_graph::Class;
 using type_graph::Container;
+using type_graph::CycleBreaker;
 using type_graph::DetectCycles;
 using type_graph::EnforceCompatibility;
 using type_graph::Enum;
@@ -117,6 +120,15 @@ struct OIArray {
 // Just here to give a different type name to containers whose keys we'll capture
 template <typename T>
 struct OICaptureKeys : public T {
+};
+
+// Gives a distinct C++ identity to a type that would otherwise close a
+// reference cycle in the generated static type system (see BreakCycles and
+// CodeGen::genCycleBreakerTypeHandler) - same size/layout as T (no members
+// added), just a different name, so a member declared as
+// `OICycleBreaker<T>*` doesn't require T to be complete at that point.
+template <typename T>
+struct OICycleBreaker : public T {
 };
 )";
 }
@@ -1007,6 +1019,59 @@ struct TypeHandler<Ctx, std::variant<Types...>> {
   code += "};\n\n";
 }
 
+// genCycleBreakerTypeHandler
+//
+// Emits the TypeHandler<Ctx, OICycleBreaker<T>> specialization for a
+// CycleBreaker node inserted by the BreakCycles pass (research groundwork
+// for byte-accurate object capture/reconstruction - see
+// docs/object-capture-initial-thoughts.md, not part of this repo - Stage 3
+// of the agreed fix for
+// https://github.com/facebookexperimental/object-introspection/issues/293).
+//
+// A member whose pointee this wraps is declared in the generated code as
+// `OICycleBreaker<T>* member;` rather than `T* member;` (see
+// type_graph::Reference::regenerateName / type_graph::Pointer::
+// regenerateName, and genDefsClass's use of `mem.type().name()`). That
+// substitution is the entire fix: it stops the member's own decltype-driven
+// TypeHandler dispatch from ever naming T again, breaking the eager C++
+// template-alias cycle that #293 describes, while leaving T's own members
+// and TypeHandler completely untouched.
+//
+// `type`/`describe`/`fields`/`processors` are all deliberately trivial
+// (Unit, no fields, no processors) rather than delegating to T's own -
+// referencing so much as `TypeHandler<Ctx, T>::type::describe` from here
+// would recreate the exact cycle this node exists to avoid: T's own `type`
+// alias is what's still being *computed* the first time this specialization
+// is ever named - it's computing it right now, via T's own cyclic member
+// needing this very type - so it isn't a usable, complete type yet. Unlike
+// a class's ordinary member functions (T's own getSizeType, lazily
+// instantiated only once actually called, long after T is complete
+// elsewhere), a `static constexpr` data member's initializer is evaluated
+// eagerly as part of completing this class, so it can't forward-reference
+// something mid-computation the way a function body safely can.
+// Consequently, capture stops at this edge: the pointer's own address is
+// still written by the generic pointer TypeHandler that dispatches here
+// (see FuncGen::DefineBasicTypeHandlers), but nothing further is written or
+// decodable through it - the same honest, partial-capture boundary this
+// project already accepts for e.g. a not-yet-reconstructed aliased pointer.
+void genCycleBreakerTypeHandler(const CycleBreaker& cb, std::string& code) {
+  code += "template <typename Ctx>\n";
+  code += "class TypeHandler<Ctx, " + cb.name() + "> {\n";
+  code += "  using DB = typename Ctx::DataBuffer;\n";
+  code += " public:\n";
+  code += "  using type = types::st::Unit<DB>;\n";
+  code +=
+      "  static constexpr std::array<exporters::inst::Field, 0> fields{};\n";
+  code +=
+      "  static constexpr std::array<exporters::inst::ProcessorInst, 0> "
+      "processors{};\n";
+  code += "  static types::st::Unit<DB> getSizeType(Ctx&, const " + cb.name() +
+          "&, type returnArg) {\n";
+  code += "    return returnArg;\n";
+  code += "  }\n";
+  code += "};\n\n";
+}
+
 void addCaptureKeySupport(std::string& code) {
   code += R"(
     template <typename Ctx, typename T>
@@ -1189,6 +1254,8 @@ void CodeGen::addTypeHandlers(const TypeGraph& typeGraph, std::string& code) {
                               cap->containerInfo(),
                               container->templateParams,
                               code);
+    } else if (const auto* cb = dynamic_cast<const CycleBreaker*>(&t)) {
+      genCycleBreakerTypeHandler(*cb, code);
     }
   }
 }
@@ -1239,16 +1306,30 @@ void CodeGen::transform(TypeGraph& typeGraph) {
 
   // Research groundwork for byte-accurate object capture/reconstruction
   // (see docs/object-capture-initial-thoughts.md, not part of this repo) -
+  // Stage 3 of the fix for facebookexperimental/object-introspection#293
+  // ("Cycles are problematic in TreeBuilder V2"): rewrites whatever
+  // Class-member Pointer/Reference edges it can safely identify as closing
+  // a cycle to route through a CycleBreaker wrapper instead, so TreeBuilder
+  // V2's static type system never has to name the still-being-defined real
+  // type again. Must run before DetectCycles (Stage 1, below) so that
+  // whatever it fixes no longer trips that pass's abort - whatever shape of
+  // cycle it can't safely fix (e.g. one mediated by a container's template
+  // parameter, not a plain class member) is deliberately left alone, and
+  // DetectCycles still catches that with its usual clear diagnostic.
+  if (config_.features[Feature::TreeBuilderV2])
+    pm.addPass(BreakCycles::createPass());
+
+  // Research groundwork for byte-accurate object capture/reconstruction
+  // (see docs/object-capture-initial-thoughts.md, not part of this repo) -
   // Stage 1 of the fix for
   // facebookexperimental/object-introspection#293 ("Cycles are problematic
   // in TreeBuilder V2"): TreeBuilder V2's static type system cannot
   // represent a cyclic type graph at all, and previously failed with
   // either an enormous template-instantiation error or an outright
-  // compiler segfault. This pass detects that case and aborts with a
-  // clear, object-centric error instead - it doesn't yet attempt to fix
-  // the cycle (see #293's own comment thread for that follow-up). Legacy
-  // (non-TreeBuilderV2) codegen doesn't hit this problem, so it's skipped
-  // there.
+  // compiler segfault. This pass detects whatever cycle BreakCycles (Stage
+  // 3, above) couldn't safely fix and aborts with a clear, object-centric
+  // error instead. Legacy (non-TreeBuilderV2) codegen doesn't hit this
+  // problem, so it's skipped there.
   if (config_.features[Feature::TreeBuilderV2])
     pm.addPass(DetectCycles::createPass());
 
@@ -1471,6 +1552,32 @@ std::string resolveTypeName(Type& t) {
     return resolveTypeName(ptr->pointeeType()) + "*";
   if (auto* ref = dynamic_cast<Reference*>(&resolved))
     return resolveTypeName(ref->pointeeType()) + "*";
+
+  // BreakCycles (#293 stage 3) has already done its job by the time
+  // reconstruction ever sees this: the reference cycle is broken, and
+  // introspection/capture codegen for it works today (see
+  // CodeGen::genCycleBreakerTypeHandler). What doesn't exist yet is the
+  // reconstruction side of a cycle - unlike every other pointer-shaped
+  // case this function names, rebuilding a genuinely self-referential
+  // object needs its ancestor's storage allocated and its address
+  // registered *before* recursing into the ancestor's own fields, so a
+  // descendant can be handed a reference to it mid-construction. That's
+  // a different construction discipline from the bottom-up "finish a
+  // value, then hand it to the caller" approach every other reconstructed
+  // type here uses (including the existing shared_ptr/raw-pointer alias
+  // registries, which only ever hand back an *already-finished* value) -
+  // real, separate follow-up work, not a missing case to wire up. Called
+  // out explicitly here, rather than falling through to the generic
+  // error below, so this reads as "cyclic reconstruction isn't built
+  // yet" rather than "unrecognized type."
+  if (dynamic_cast<CycleBreaker*>(&resolved))
+    throw std::runtime_error(
+        "CodeGen::resolveTypeName: " + resolved.name() +
+        " sits on a reference cycle that BreakCycles has already broken "
+        "for introspection, but reconstructing a genuinely cyclic object "
+        "isn't supported yet (see facebookexperimental/"
+        "object-introspection#293's stage 3+, and "
+        "docs/object-capture-initial-thoughts.md, not part of this repo)");
 
   throw std::runtime_error(
       "CodeGen::resolveTypeName: " + resolved.name() +
