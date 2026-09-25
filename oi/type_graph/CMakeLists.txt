@@ -1,6 +1,7 @@
 add_library(type_graph
   AddPadding.cpp
   AlignmentCalc.cpp
+  BreakCycles.cpp
   ClangTypeParser.cpp
   DetectCycles.cpp
   EnforceCompatibility.cpp

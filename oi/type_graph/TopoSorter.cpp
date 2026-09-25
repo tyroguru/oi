@@ -164,6 +164,11 @@ void TopoSorter::visit(CaptureKeys& c) {
   sortedTypes_.push_back(c);
 }
 
+void TopoSorter::visit(CycleBreaker& c) {
+  accept(c.underlyingType());
+  sortedTypes_.push_back(c);
+}
+
 void TopoSorter::visit(Incomplete& i) {
   sortedTypes_.push_back(i);
 }

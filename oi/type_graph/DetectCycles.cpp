@@ -61,6 +61,17 @@ void DetectCycles::visit(Class& c) {
   }
 }
 
+void DetectCycles::visit(CycleBreaker&) {
+  // A CycleBreaker's entire purpose (see BreakCycles, Stage 3) is to give a
+  // cyclic pointee a distinct C++ identity so the generated TypeHandler
+  // never has to name the real, still-being-defined type again - the exact
+  // edge this pass would otherwise report. Walking transparently through it
+  // (RecursiveVisitor's default) would just rediscover the very cycle that
+  // wrapper already fixed. Treat it as an opaque leaf here instead: whatever
+  // it wraps has already been (or is still being) walked via the real edge
+  // that reaches it directly.
+}
+
 void DetectCycles::visit(Container& c) {
   for (size_t i = 0; i < c.templateParams.size(); i++) {
     pushEdge(c.name() + " (template parameter " + std::to_string(i) +

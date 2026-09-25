@@ -186,6 +186,12 @@ void Printer::visit(const CaptureKeys& d) {
   print(d.underlyingType());
 }
 
+void Printer::visit(const CycleBreaker& d) {
+  prefix();
+  out_ << "CycleBreaker" << std::endl;
+  print(d.underlyingType());
+}
+
 void Printer::prefix() {
   int indent = baseIndent_ + depth_ * 2;
   out_ << std::string(indent, ' ');

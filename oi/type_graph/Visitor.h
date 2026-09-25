@@ -119,6 +119,9 @@ class RecursiveVisitor : public Visitor<void> {
   virtual void visit(CaptureKeys& c) {
     accept(c.underlyingType());
   }
+  virtual void visit(CycleBreaker& c) {
+    accept(c.underlyingType());
+  }
 };
 
 /*
@@ -190,6 +193,10 @@ class RecursiveMutator : public Visitor<Type&> {
     return d;
   }
   virtual Type& visit(CaptureKeys& c) {
+    c.setUnderlyingType(mutate(c.underlyingType()));
+    return c;
+  }
+  virtual Type& visit(CycleBreaker& c) {
     c.setUnderlyingType(mutate(c.underlyingType()));
     return c;
   }

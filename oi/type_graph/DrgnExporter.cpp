@@ -222,6 +222,14 @@ drgn_type* DrgnExporter::visit(CaptureKeys&) {
   throw std::runtime_error("Feature not supported");
 }
 
+drgn_type* DrgnExporter::visit(CycleBreaker&) {
+  // CycleBreaker only ever gets inserted by a Feature::TreeBuilderV2-gated
+  // pass (see docs/object-capture-initial-thoughts.md, not part of this
+  // repo) - the legacy drgn-based path this exporter serves never
+  // produces or consumes one.
+  throw std::runtime_error("Feature not supported");
+}
+
 drgn_type* DrgnExporter::makeDrgnType(enum drgn_type_kind kind,
                                       bool is_complete,
                                       enum drgn_primitive_type primitive,

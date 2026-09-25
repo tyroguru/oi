@@ -219,6 +219,11 @@ void NameGen::visit(CaptureKeys& c) {
   c.regenerateName();
 }
 
+void NameGen::visit(CycleBreaker& c) {
+  RecursiveVisitor::visit(c);
+  c.regenerateName();
+}
+
 void NameGen::visit(Incomplete& i) {
   constexpr std::string_view kPrefix{"Incomplete<struct "};
 

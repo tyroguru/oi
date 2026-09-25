@@ -44,6 +44,7 @@ class Printer : public ConstVisitor {
   void visit(const Dummy& d) override;
   void visit(const DummyAllocator& d) override;
   void visit(const CaptureKeys& d) override;
+  void visit(const CycleBreaker& d) override;
 
  private:
   void prefix();

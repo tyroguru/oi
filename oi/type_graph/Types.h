@@ -54,7 +54,8 @@
   X(Reference)       \
   X(Dummy)           \
   X(DummyAllocator)  \
-  X(CaptureKeys)
+  X(CaptureKeys)     \
+  X(CycleBreaker)
 
 struct ContainerInfo;
 struct drgn_type;
@@ -985,6 +986,77 @@ class CaptureKeys : public Type {
  private:
   std::reference_wrapper<Type> underlyingType_;
   const ContainerInfo& containerInfo_;
+  std::string name_;
+};
+
+/*
+ * CycleBreaker
+ *
+ * Research groundwork for byte-accurate object capture/reconstruction (see
+ * docs/object-capture-initial-thoughts.md, not part of this repo) - Stage 3
+ * of the fix for
+ * https://github.com/facebookexperimental/object-introspection/issues/293
+ * ("Cycles are problematic in TreeBuilder V2"). Wraps a type that a
+ * reference cycle would otherwise force TreeBuilder V2's static type
+ * system to define recursively (a `using type = ...` alias needing itself
+ * to already be resolved - impossible in C++, unlike an ordinary
+ * self-referential struct with a pointer member, which compiles fine).
+ *
+ * Same size/alignment/name as the real type it wraps (this node never
+ * appears as a member's own declared type - only as a Pointer's or
+ * Reference's *pointee*, replacing the one edge that would otherwise close
+ * the cycle), but a distinct node/type identity, exactly like CaptureKeys
+ * above (the same pattern, for a related but different reason): codegen
+ * gives it its own TypeHandler specialization, deliberately *not* nesting
+ * the real type's own `::type` alias - only calling into the real type's
+ * already-fully-defined TypeHandler at the point CycleBreaker's own
+ * methods actually run, by which point ordinary topological declaration
+ * order has already made that safe.
+ */
+class CycleBreaker : public Type {
+ public:
+  explicit CycleBreaker(Type& t) : underlyingType_(t) {
+    regenerateName();
+  }
+
+  static inline constexpr bool has_node_id = false;
+
+  DECLARE_ACCEPT
+
+  virtual const std::string& name() const override {
+    return name_;
+  }
+
+  virtual std::string_view inputName() const override {
+    return underlyingType_.get().inputName();
+  }
+
+  void regenerateName() {
+    name_ = "OICycleBreaker<" + underlyingType_.get().name() + ">";
+  }
+
+  virtual size_t size() const override {
+    return underlyingType_.get().size();
+  }
+
+  virtual uint64_t align() const override {
+    return underlyingType_.get().align();
+  }
+
+  virtual NodeId id() const override {
+    return -1;
+  }
+
+  Type& underlyingType() const {
+    return underlyingType_;
+  }
+
+  void setUnderlyingType(Type& t) {
+    underlyingType_ = t;
+  }
+
+ private:
+  std::reference_wrapper<Type> underlyingType_;
   std::string name_;
 };
 
