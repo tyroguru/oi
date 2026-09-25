@@ -232,3 +232,117 @@ set_target_properties(cycle_breaking_demo
   PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
 )
+
+#
+# cyclic_reconstruct_demo: the follow-up to cycle_breaking_demo above -
+# proves true cyclic *reconstruction* (not just introspection) works, both
+# for a cycle that closes onto a non-root ancestor (succeeds, real values)
+# and one that closes onto the reconstruction root itself (cleanly rejected
+# - see CyclicReconstructDemo.cpp's own header comment). Needs the same
+# capture-bytes + chase-raw-pointers config as reconstruct_demo, so it
+# reuses PrependCaptureBytesFeature.cmake rather than
+# PrependChaseRawPointersFeature.cmake.
+#
+
+set(CYCLIC_RECONSTRUCT_DEMO_BASE_CONFIG_PATH
+  "${CMAKE_CURRENT_BINARY_DIR}/cyclic-reconstruct-demo.oid.toml.base"
+)
+set(CYCLIC_RECONSTRUCT_DEMO_CONFIG_PATH
+  "${CMAKE_CURRENT_BINARY_DIR}/cyclic-reconstruct-demo.oid.toml"
+)
+
+add_custom_command(
+  OUTPUT "${CYCLIC_RECONSTRUCT_DEMO_CONFIG_PATH}"
+  COMMAND
+    ${PYTHON}
+    "${PROJECT_SOURCE_DIR}/tools/config_gen.py"
+    --compiler "${CMAKE_CXX_COMPILER}"
+    "${CYCLIC_RECONSTRUCT_DEMO_BASE_CONFIG_PATH}"
+  COMMAND
+    ${CMAKE_COMMAND}
+    "-DIN_FILE=${CYCLIC_RECONSTRUCT_DEMO_BASE_CONFIG_PATH}"
+    "-DOUT_FILE=${CYCLIC_RECONSTRUCT_DEMO_CONFIG_PATH}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/PrependCaptureBytesFeature.cmake"
+  DEPENDS
+    "${PROJECT_SOURCE_DIR}/tools/config_gen.py"
+    "${PROJECT_SOURCE_DIR}/dev.oid.toml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PrependCaptureBytesFeature.cmake"
+  WORKING_DIRECTORY
+    "${PROJECT_SOURCE_DIR}"
+  COMMENT
+    "Generating cyclic_reconstruct_demo oilgen config (capture-bytes, chase-raw-pointers enabled)"
+  VERBATIM
+)
+
+add_custom_target(cyclic_reconstruct_demo_config
+  DEPENDS "${CYCLIC_RECONSTRUCT_DEMO_CONFIG_PATH}"
+)
+
+# Step 1: compile the source normally.
+add_library(cyclic_reconstruct_demo_obj OBJECT CyclicReconstructDemo.cpp)
+
+target_include_directories(cyclic_reconstruct_demo_obj
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+)
+
+target_compile_definitions(cyclic_reconstruct_demo_obj
+  PRIVATE
+    OIL_AOT_COMPILATION=1
+)
+
+target_compile_features(cyclic_reconstruct_demo_obj
+  PRIVATE
+    cxx_std_20
+)
+
+target_compile_options(cyclic_reconstruct_demo_obj
+  PRIVATE
+    $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-g>
+)
+
+# Step 2: run oilgen against the *same* source to generate the missing
+# introspectImpl<RawNode>/reconstructImpl<RawNode> definitions.
+set(CYCLIC_RECONSTRUCT_DEMO_GENERATED_O
+  "${CMAKE_CURRENT_BINARY_DIR}/cyclic_reconstruct_demo.introspection.o"
+)
+
+add_custom_command(
+  OUTPUT "${CYCLIC_RECONSTRUCT_DEMO_GENERATED_O}"
+  COMMAND
+    $<TARGET_FILE:oilgen>
+    -p "${CMAKE_BINARY_DIR}"
+    "--config-file=${CYCLIC_RECONSTRUCT_DEMO_CONFIG_PATH}"
+    "--output=${CYCLIC_RECONSTRUCT_DEMO_GENERATED_O}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/CyclicReconstructDemo.cpp"
+  DEPENDS
+    oilgen
+    cyclic_reconstruct_demo_obj
+    cyclic_reconstruct_demo_config
+    "${CMAKE_CURRENT_SOURCE_DIR}/CyclicReconstructDemo.cpp"
+  COMMENT
+    "oilgen: generating AOT introspect+reconstruct code for CyclicReconstructDemo.cpp"
+  VERBATIM
+)
+
+add_custom_target(cyclic_reconstruct_demo_generated
+  DEPENDS "${CYCLIC_RECONSTRUCT_DEMO_GENERATED_O}"
+)
+
+# Step 3: link both object files, plus the OIL runtime support library.
+add_executable(cyclic_reconstruct_demo
+  $<TARGET_OBJECTS:cyclic_reconstruct_demo_obj>
+  "${CYCLIC_RECONSTRUCT_DEMO_GENERATED_O}"
+)
+
+add_dependencies(cyclic_reconstruct_demo cyclic_reconstruct_demo_generated)
+
+target_link_libraries(cyclic_reconstruct_demo
+  PRIVATE
+    oil_shared
+)
+
+set_target_properties(cyclic_reconstruct_demo
+  PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
+)

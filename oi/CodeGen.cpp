@@ -152,8 +152,8 @@ void addPreprocessorDefines(const OICodeGenConfig& config, std::string& code) {
 void addIncludes(const TypeGraph& typeGraph,
                  const OICodeGenConfig& config,
                  std::string& code) {
-  std::set<std::string_view> includes{"cstddef", "optional", "stdexcept",
-                                      "unordered_map"};
+  std::set<std::string_view> includes{
+      "cstddef", "new", "optional", "stdexcept", "unordered_map"};
   if (config.features[Feature::TreeBuilderV2]) {
     code += "#define DEFINE_DESCRIBE 1\n";  // added before all includes
 
@@ -1037,39 +1037,111 @@ struct TypeHandler<Ctx, std::variant<Types...>> {
 // template-alias cycle that #293 describes, while leaving T's own members
 // and TypeHandler completely untouched.
 //
-// `type`/`describe`/`fields`/`processors` are all deliberately trivial
-// (Unit, no fields, no processors) rather than delegating to T's own -
-// referencing so much as `TypeHandler<Ctx, T>::type::describe` from here
-// would recreate the exact cycle this node exists to avoid: T's own `type`
-// alias is what's still being *computed* the first time this specialization
-// is ever named - it's computing it right now, via T's own cyclic member
-// needing this very type - so it isn't a usable, complete type yet. Unlike
-// a class's ordinary member functions (T's own getSizeType, lazily
-// instantiated only once actually called, long after T is complete
-// elsewhere), a `static constexpr` data member's initializer is evaluated
-// eagerly as part of completing this class, so it can't forward-reference
-// something mid-computation the way a function body safely can.
-// Consequently, capture stops at this edge: the pointer's own address is
-// still written by the generic pointer TypeHandler that dispatches here
-// (see FuncGen::DefineBasicTypeHandlers), but nothing further is written or
-// decodable through it - the same honest, partial-capture boundary this
-// project already accepts for e.g. a not-yet-reconstructed aliased pointer.
+// `type`/`describe`/`fields`/`processors` never delegate to T's own -
+// referencing so much as `TypeHandler<Ctx, T>::type::describe` from *here*
+// (a type alias, eagerly resolved) would recreate the exact cycle this node
+// exists to avoid: T's own `type` alias is what's still being *computed*
+// the first time this specialization is ever named. `type` itself stays a
+// trivial, T-independent shape (`Unit` when capture-bytes is off, matching
+// this project's existing "off means zero wire bytes" convention
+// everywhere else - or `DynBytes`, a runtime-length opaque blob, when it's
+// on) precisely so it never has to name T's shape.
+//
+// `getSizeType`'s *body*, unlike `type`, is a function - lazily
+// instantiated only once actually called, long after T's own TypeHandler
+// specialization is complete elsewhere (the same escape hatch this
+// project's static/dynamic type split already relies on for an object's
+// ordinary member functions). That's what makes it safe for this function
+// to recurse into T's real capture, genuinely writing T's real content
+// into the DynBytes blob - a private, nested sub-capture (see
+// __oi_cycle_breaker_nested_ctx) sharing this capture's own address
+// dedup set (ctx.pointers) but writing into its own temporary buffer, so
+// its length is known before it's embedded. Sharing the dedup set is load-
+// bearing, not an optimization: it's what makes a *genuine* cycle
+// terminate correctly (the one edge that's an actual repeat finds its
+// target already in ctx.pointers and stops, exactly like the outermost
+// capture already does today) while every other, merely first-seen
+// occurrence of this edge's type gets its real content captured, not just
+// its address - see defineCycleBreakerCaptureSupport's own doc for the
+// C++-template-instantiation reason this has to be one, fixed,
+// globally-declared type rather than declared fresh per call.
 void genCycleBreakerTypeHandler(const CycleBreaker& cb, std::string& code) {
+  const std::string underlyingName = cb.underlyingType().name();
   code += "template <typename Ctx>\n";
   code += "class TypeHandler<Ctx, " + cb.name() + "> {\n";
   code += "  using DB = typename Ctx::DataBuffer;\n";
   code += " public:\n";
-  code += "  using type = types::st::Unit<DB>;\n";
+  code +=
+      "  using type = std::conditional_t<oi_capture_bytes, "
+      "types::st::DynBytes<DB>, types::st::Unit<DB>>;\n";
   code +=
       "  static constexpr std::array<exporters::inst::Field, 0> fields{};\n";
   code +=
       "  static constexpr std::array<exporters::inst::ProcessorInst, 0> "
       "processors{};\n";
-  code += "  static types::st::Unit<DB> getSizeType(Ctx&, const " + cb.name() +
-          "&, type returnArg) {\n";
-  code += "    return returnArg;\n";
+  code += "  static types::st::Unit<DB> getSizeType(Ctx& ctx, const " +
+          cb.name() + "& t, type returnArg) {\n";
+  code += "    if constexpr (oi_capture_bytes) {\n";
+  code += "      std::vector<uint8_t> __oi_nested_buf;\n";
+  code +=
+      "      __oi_cycle_breaker_nested_ctx __oi_nested_ctx{.pointers = "
+      "ctx.pointers};\n";
+  code += "      typename TypeHandler<__oi_cycle_breaker_nested_ctx, " +
+          underlyingName +
+          ">::type __oi_nested_ret{"
+          "__oi_cycle_breaker_nested_ctx::DataBuffer{__oi_nested_buf}};\n";
+  code += "      TypeHandler<__oi_cycle_breaker_nested_ctx, " + underlyingName +
+          ">::getSizeType(\n"
+          "          __oi_nested_ctx, static_cast<const " +
+          underlyingName + "&>(t), __oi_nested_ret);\n";
+  code +=
+      "      return returnArg.write(std::span<const "
+      "uint8_t>(__oi_nested_buf));\n";
+  code += "    } else {\n";
+  code += "      return returnArg;\n";
+  code += "    }\n";
   code += "  }\n";
   code += "};\n\n";
+}
+
+bool typeGraphHasCycleBreaker(const TypeGraph& typeGraph) {
+  for (const Type& t : typeGraph.finalTypes) {
+    if (dynamic_cast<const CycleBreaker*>(&t))
+      return true;
+  }
+  return false;
+}
+
+// Declares __oi_cycle_breaker_nested_ctx, the one, fixed Ctx type every
+// genCycleBreakerTypeHandler specialization's nested sub-capture uses,
+// regardless of how deep the actual recursion goes at runtime or what the
+// outermost Ctx was. This has to be a single, globally-declared type, not a
+// fresh one declared locally inside getSizeType's own body: a local struct
+// there would be a *different type* at every nesting level (it's local to
+// a function template, so implicitly parameterized by that function's own
+// Ctx), which would mean the compiler has to instantiate a new
+// TypeHandler<ThatLevelsCtx, T> specialization per level - an unbounded
+// family of distinct template instantiations for a graph whose actual
+// depth is only known at runtime, i.e. exactly the "enormous template-
+// instantiation error" #293 was originally about, just reintroduced one
+// level down. A single, fixed type sidesteps this entirely: every level's
+// recursive call targets the *same*, already-instantiated
+// TypeHandler<__oi_cycle_breaker_nested_ctx, T>, so further recursion is
+// ordinary runtime function calls, not new template instantiations -
+// verified directly with an isolated prototype before landing this, given
+// how easy this class of mistake is to get wrong silently.
+//
+// Needs BackInserter<std::vector<uint8_t>> already declared - the nested
+// capture always writes into a private, temporary buffer so its length is
+// known before being embedded, regardless of what DataBuffer the *outer*
+// capture actually uses (a live ptrace target's DataSegment, for oid).
+void defineCycleBreakerCaptureSupport(std::string& code) {
+  code += R"(
+struct __oi_cycle_breaker_nested_ctx {
+  using DataBuffer = oi::detail::DataBuffer::BackInserter<std::vector<uint8_t>>;
+  PointerHashSet<>& pointers;
+};
+)";
 }
 
 void addCaptureKeySupport(std::string& code) {
@@ -1371,16 +1443,29 @@ void CodeGen::generate(TypeGraph& typeGraph,
   defineInternalTypes(code);
   FuncGen::DefineJitLog(code, config_.features);
 
+  bool needsCycleBreakerSupport = config_.features[Feature::TreeBuilderV2] &&
+                                  typeGraphHasCycleBreaker(typeGraph);
+
   if (config_.features[Feature::TreeBuilderV2]) {
     if (config_.features[Feature::Library]) {
       FuncGen::DefineBackInserterDataBuffer(code);
     } else {
       FuncGen::DefineDataSegmentDataBuffer(code);
+      if (needsCycleBreakerSupport) {
+        // genCycleBreakerTypeHandler's nested sub-capture always writes
+        // into a private, temporary std::vector, regardless of what the
+        // *outer* capture uses (a live ptrace target's DataSegment, here) -
+        // so it needs BackInserter declared too, which the Library branch
+        // above already gets for free.
+        FuncGen::DefineBackInserterDataBuffer(code);
+      }
     }
     code += "using namespace oi;\n";
     code += "using namespace oi::detail;\n";
     code += "using oi::exporters::ParsedData;\n";
     code += "using namespace oi::exporters;\n";
+    if (needsCycleBreakerSupport)
+      defineCycleBreakerCaptureSupport(code);
   }
 
   if (config_.features[Feature::CaptureThriftIsset]) {
@@ -1485,16 +1570,48 @@ Type& unwrapTypedefs(Type& t) {
   return *resolved;
 }
 
+// A Pointer/Reference's pointee, as reconstruction should see it - unwraps
+// a CycleBreaker (see BreakCycles) back to the real underlying type it
+// wraps. CycleBreaker exists purely to keep the *write* side's static type
+// system from having to name a still-being-defined type again
+// (genCycleBreakerTypeHandler); it carries no information reconstruction
+// needs to preserve - the pointee is, and was always, the real type, just
+// reached via an edge that might close a reference cycle (see
+// emitReconstructPointerValue, which is what actually decides how to
+// handle that possibility).
+Type& resolvePointeeForReconstruct(Type& pointeeType) {
+  if (auto* cb = dynamic_cast<CycleBreaker*>(&pointeeType))
+    return cb->underlyingType();
+  return pointeeType;
+}
+
 // Recursively names the concrete C++ type reconstruction should produce
 // for `t` - a Primitive's own name, or a reconstructable Container
 // parameterized by its own element type's name in turn (e.g.
 // "std::vector<std::__cxx11::basic_string<char>>"). Needed because
 // Container::name() alone is just the bare container name with no
 // template arguments (e.g. "std::vector") - not enough to name a
-// concrete, constructible type on its own. See generateReconstructContainerBody's
-// t0Name comment for the known char/int8_t caveat this inherits.
+// concrete, constructible type on its own. See
+// generateReconstructContainerBody's t0Name comment for the known char/int8_t
+// caveat this inherits.
 std::string resolveTypeName(Type& t) {
   Type& resolved = unwrapTypedefs(t);
+
+  // A bare CycleBreaker, reached here via a Pointer/Reference's own
+  // recursion just below (never any other way - see BreakCycles) - this is
+  // the *wire-shape* name (matching genCycleBreakerTypeHandler's own
+  // OICycleBreaker<Real> spelling), deliberately not unwrapped to the real
+  // type: a member declared through this edge is genuinely
+  // TypeHandler<Ctx, OICycleBreaker<Real>*> on the wire (a Unit payload,
+  // wholly different size/shape from TypeHandler<Ctx, Real*>), so a caller
+  // asking "what C++ type reads this member's captured bytes" needs this
+  // exact spelling. A caller instead asking "what type should I allocate
+  // to hold this edge's *reconstructed value*" wants the real type -
+  // that's resolvePointeeForReconstruct's job, used explicitly by
+  // emitReconstructPointerValue/emitAliasRegistries before ever calling
+  // this function, not something this function should do to every caller.
+  if (auto* cb = dynamic_cast<CycleBreaker*>(&resolved))
+    return "OICycleBreaker<" + resolveTypeName(cb->underlyingType()) + ">";
 
   if (auto* prim = dynamic_cast<Primitive*>(&resolved))
     return prim->name();
@@ -1526,9 +1643,9 @@ std::string resolveTypeName(Type& t) {
 
   if (auto* cont = dynamic_cast<Container*>(&resolved)) {
     if (cont->templateParams.empty())
-      throw std::runtime_error("CodeGen::resolveTypeName: " +
-                               cont->containerInfo_.typeName +
-                               " has no template parameters");
+      throw std::runtime_error(
+          "CodeGen::resolveTypeName: " + cont->containerInfo_.typeName +
+          " has no template parameters");
     std::string name = cont->containerInfo_.typeName + "<" +
                        resolveTypeName(cont->templateParams[0].type());
     // A second template parameter (e.g. a map's value type) is named too,
@@ -1552,32 +1669,6 @@ std::string resolveTypeName(Type& t) {
     return resolveTypeName(ptr->pointeeType()) + "*";
   if (auto* ref = dynamic_cast<Reference*>(&resolved))
     return resolveTypeName(ref->pointeeType()) + "*";
-
-  // BreakCycles (#293 stage 3) has already done its job by the time
-  // reconstruction ever sees this: the reference cycle is broken, and
-  // introspection/capture codegen for it works today (see
-  // CodeGen::genCycleBreakerTypeHandler). What doesn't exist yet is the
-  // reconstruction side of a cycle - unlike every other pointer-shaped
-  // case this function names, rebuilding a genuinely self-referential
-  // object needs its ancestor's storage allocated and its address
-  // registered *before* recursing into the ancestor's own fields, so a
-  // descendant can be handed a reference to it mid-construction. That's
-  // a different construction discipline from the bottom-up "finish a
-  // value, then hand it to the caller" approach every other reconstructed
-  // type here uses (including the existing shared_ptr/raw-pointer alias
-  // registries, which only ever hand back an *already-finished* value) -
-  // real, separate follow-up work, not a missing case to wire up. Called
-  // out explicitly here, rather than falling through to the generic
-  // error below, so this reads as "cyclic reconstruction isn't built
-  // yet" rather than "unrecognized type."
-  if (dynamic_cast<CycleBreaker*>(&resolved))
-    throw std::runtime_error(
-        "CodeGen::resolveTypeName: " + resolved.name() +
-        " sits on a reference cycle that BreakCycles has already broken "
-        "for introspection, but reconstructing a genuinely cyclic object "
-        "isn't supported yet (see facebookexperimental/"
-        "object-introspection#293's stage 3+, and "
-        "docs/object-capture-initial-thoughts.md, not part of this repo)");
 
   throw std::runtime_error(
       "CodeGen::resolveTypeName: " + resolved.name() +
@@ -1639,8 +1730,8 @@ std::vector<ReconstructableMember> collectReconstructableMembers(
         !dynamic_cast<Pointer*>(&resolved) &&
         !dynamic_cast<Reference*>(&resolved)) {
       throw std::runtime_error(
-          "CodeGen::generateReconstructClass: member " + cls.name() + "::" +
-          member.name +
+          "CodeGen::generateReconstructClass: member " + cls.name() +
+          "::" + member.name +
           " is neither a scalar, an enum, a class, a reconstructable "
           "container, nor a pointer - not yet supported (see "
           "docs/object-capture-initial-thoughts.md)");
@@ -1723,14 +1814,35 @@ void CodeGen::emitReconstructTypeHandlerSupport(TypeGraph& typeGraph,
 // fields), and all of them must resolve to the *same* registry for
 // aliasing between them to be detected at all.
 //
-// Repopulates aliasRegistryIndices_ from scratch each call - this and
-// emitReconstructValue's later lookups are always paired within a single
-// generate()/generateReconstruct() call for one root, so nothing from a
-// previous root (if this CodeGen instance is ever reused for another) can
-// leak in as a stale, wrongly-reused index.
+// Also (re)populates cycleCapableClasses_ - every Class that's some
+// CycleBreaker's underlying type anywhere in the graph, a type-wide
+// property collected here for the same reason aliasRegistryIndices_ is:
+// emitReconstructPointerValue needs to know it for *any* edge reaching that
+// Class, not just the specific edge(s) BreakCycles itself rewrote to close
+// the cycle (see cycleCapableClasses_'s own doc in CodeGen.h for why that
+// distinction matters).
+//
+// Repopulates both from scratch each call - this and emitReconstructValue's
+// later lookups are always paired within a single generate()/
+// generateReconstruct() call for one root, so nothing from a previous root
+// (if this CodeGen instance is ever reused for another) can leak in as a
+// stale, wrongly-reused index.
 void CodeGen::emitAliasRegistries(TypeGraph& typeGraph, std::string& code) {
   aliasRegistryIndices_.clear();
+  cycleCapableClasses_.clear();
+  cycleReconstructHelperNames_.clear();
+  cycleReconstructHelpersCode_.clear();
+  cycleReconstructHelperCounter_ = 0;
+  std::vector<std::string> fieldTypeNames;
   for (Type& t : typeGraph.finalTypes) {
+    if (auto* cb = dynamic_cast<CycleBreaker*>(&t)) {
+      if (auto* cls = dynamic_cast<Class*>(&cb->underlyingType())) {
+        cycleCapableClasses_.insert(cls);
+      }
+      continue;  // Never itself alias-eligible - see
+                 // resolvePointeeForReconstruct.
+    }
+
     std::string key;
     std::string valueTypeName;
 
@@ -1743,11 +1855,22 @@ void CodeGen::emitAliasRegistries(TypeGraph& typeGraph, std::string& code) {
             resolveTypeName(cont->templateParams[0].type());
       valueTypeName = resolveTypeName(*cont);
     } else if (auto* ptr = dynamic_cast<Pointer*>(&t)) {
-      key = "raw-pointer|" + resolveTypeName(ptr->pointeeType());
-      valueTypeName = resolveTypeName(ptr->pointeeType()) + "*";
+      // A CycleBreaker-wrapped pointee (see BreakCycles) names itself as
+      // "OICycleBreaker<Real>" - not a type reconstruction can ever build
+      // or store a value of. The registry keys/stores by the *real*
+      // underlying type instead: CycleBreaker only exists to keep the
+      // write side's static type system from having to name a
+      // still-being-defined type again (see genCycleBreakerTypeHandler) -
+      // reconstruction never sees it as anything other than "the real
+      // type, reached via an edge that might close a cycle" (see
+      // emitReconstructPointerValue).
+      Type& realPointee = resolvePointeeForReconstruct(ptr->pointeeType());
+      key = "raw-pointer|" + resolveTypeName(realPointee);
+      valueTypeName = resolveTypeName(realPointee) + "*";
     } else if (auto* ref = dynamic_cast<Reference*>(&t)) {
-      key = "raw-pointer|" + resolveTypeName(ref->pointeeType());
-      valueTypeName = resolveTypeName(ref->pointeeType()) + "*";
+      Type& realPointee = resolvePointeeForReconstruct(ref->pointeeType());
+      key = "raw-pointer|" + resolveTypeName(realPointee);
+      valueTypeName = resolveTypeName(realPointee) + "*";
     } else {
       continue;
     }
@@ -1758,9 +1881,34 @@ void CodeGen::emitAliasRegistries(TypeGraph& typeGraph, std::string& code) {
 
     size_t index = aliasRegistryIndices_.size();
     aliasRegistryIndices_.emplace(std::move(key), index);
-    code += "  std::unordered_map<uint64_t, " + valueTypeName +
-            "> __oi_alias_registry_" + std::to_string(index) + ";\n";
+    fieldTypeNames.push_back(std::move(valueTypeName));
   }
+
+  // A single struct bundling every registry, rather than one bare local
+  // variable per registry (as an earlier version of this code did) - a
+  // cycle-capable Class's own decode logic is generated once as a
+  // reusable, namespace-scope helper function (see
+  // getOrEmitCycleReconstructHelper), which needs to reach these same
+  // registries too, but has no access to locals of whatever function
+  // happens to call it. One struct type, passed by reference, gives both
+  // the main function and every helper function uniform access under the
+  // same field names - see __oi_reg's own declaration just below, and
+  // emitReconstructPointerValue's use of "__oi_reg.field_N" instead of a
+  // bare variable name.
+  //
+  // The struct *type* is declared into cycleReconstructHelpersCode_, not
+  // `code` - it has to be visible at namespace scope, before any helper
+  // function that takes it as a parameter, not local to the main
+  // reconstruct function the way `code` here ultimately becomes part of.
+  cycleReconstructHelpersCode_ += "struct __oi_registries {\n";
+  for (size_t i = 0; i < fieldTypeNames.size(); i++) {
+    cycleReconstructHelpersCode_ += "  std::unordered_map<uint64_t, " +
+                                    fieldTypeNames[i] + "> field_" +
+                                    std::to_string(i) + ";\n";
+  }
+  cycleReconstructHelpersCode_ += "};\n\n";
+
+  code += "  __oi_registries __oi_reg;\n";
 }
 
 // Emits the struct's own redeclaration (internal-linkage, layout-identical
@@ -1802,22 +1950,36 @@ void CodeGen::generateReconstructClassBody(TypeGraph& typeGraph,
                                            Class& cls,
                                            const std::string& typeToHash,
                                            std::string& code) {
-  std::vector<ReconstructableMember> members = collectReconstructableMembers(cls);
+  std::vector<ReconstructableMember> members =
+      collectReconstructableMembers(cls);
   size_t n = members.size();
 
   // Ctx/DB/TypeHandler need to be in scope here, at namespace scope,
   // because the leaf_i shape declarations just below (also namespace
   // scope, same reason the pre-existing scalar-only version needed
   // `static constexpr`: dy::Pair's fields are references, which need
-  // something with a stable address to refer to) reference them. Once
-  // declared here they're equally visible inside the function body below,
-  // for emitReconstructValue's own use of Ctx/DB/TypeHandler - one
-  // declaration serves both.
+  // something with a stable address to refer to) reference them. Emitted
+  // into `code` directly, *before* cycleReconstructHelpersCode_ - a
+  // cycle-capable member's own reusable helper function (see
+  // getOrEmitCycleReconstructHelper) is a separate, namespace-scope
+  // function, not nested inside the main function below, so it needs
+  // these declarations visible before its own definition too, not just
+  // before the main function's.
   code += "using DB = int;\n";
   code += "struct OIReconstructFakeCtx { using DataBuffer = DB; };\n";
   code += "using Ctx = OIReconstructFakeCtx;\n";
   code += "using OIInternal::TypeHandler;\n";
   code += "using OIInternal::oi_capture_bytes;\n";
+
+  // Built separately from `code`, not appended to it directly: any
+  // cycle-capable member reachable from `cls` gets its own reusable helper
+  // function generated into cycleReconstructHelpersCode_ *during* the
+  // emitReconstructClassValue call below (see
+  // getOrEmitCycleReconstructHelper) - which has to be defined *before*
+  // this function is, even though it's only known to exist once this
+  // function's own generation is already complete. Assembled into `code`
+  // in the right order at the end.
+  std::string mainFnCode;
 
   // Each member's own leaf shape - TypeHandler<Ctx, T>::type::describe
   // rather than a hand-built dy::Bytes{sizeof(T)}, so a container-typed
@@ -1828,34 +1990,38 @@ void CodeGen::generateReconstructClassBody(TypeGraph& typeGraph,
   // value as before, just obtained via the same general mechanism as
   // everything else rather than a special case.
   for (size_t i = 0; i < n; i++) {
-    code += "static constexpr auto leaf_" + std::to_string(i) +
-            " = TypeHandler<Ctx, " + resolveTypeName(*members[i].type) +
-            ">::type::describe;\n";
+    mainFnCode += "static constexpr auto leaf_" + std::to_string(i) +
+                  " = TypeHandler<Ctx, " + resolveTypeName(*members[i].type) +
+                  ">::type::describe;\n";
   }
   if (n > 1) {
     for (size_t i = n - 1; i-- > 0;) {
       std::string rhs = (i == n - 2) ? "leaf_" + std::to_string(n - 1)
                                      : "pair_" + std::to_string(i + 1);
-      code += "static constexpr oi::types::dy::Pair pair_" + std::to_string(i) +
-              "{leaf_" + std::to_string(i) + ", " + rhs + "};\n";
+      mainFnCode += "static constexpr oi::types::dy::Pair pair_" +
+                    std::to_string(i) + "{leaf_" + std::to_string(i) + ", " +
+                    rhs + "};\n";
     }
   }
   const std::string shapeVar = (n == 1) ? "leaf_0" : "pair_0";
 
-  code += "extern \"C\" OIInternal::__ROOT_TYPE__ " + typeToHash +
-          "(std::span<const uint8_t> bytes) {\n";
-  emitAliasRegistries(typeGraph, code);
-  code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
-  code += "  auto it = vec.cbegin();\n";
-  code += "  auto parsed = oi::exporters::ParsedData::parse(it, " + shapeVar +
-          ");\n";
+  mainFnCode += "extern \"C\" OIInternal::__ROOT_TYPE__ " + typeToHash +
+                "(std::span<const uint8_t> bytes) {\n";
+  emitAliasRegistries(typeGraph, mainFnCode);
+  mainFnCode += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
+  mainFnCode += "  auto it = vec.cbegin();\n";
+  mainFnCode += "  auto parsed = oi::exporters::ParsedData::parse(it, " +
+                shapeVar + ");\n";
 
   size_t idCounter = 0;
   std::string resultExpr =
-      emitReconstructClassValue(cls, "parsed", idCounter, code);
+      emitReconstructClassValue(cls, "parsed", idCounter, mainFnCode);
 
-  code += "  return " + resultExpr + ";\n";
-  code += "}\n";
+  mainFnCode += "  return " + resultExpr + ";\n";
+  mainFnCode += "}\n";
+
+  code += cycleReconstructHelpersCode_;
+  code += mainFnCode;
 }
 
 // Recursively reconstructs a non-union Class from `parsedDataExpr`'s own
@@ -1878,49 +2044,80 @@ void CodeGen::generateReconstructClassBody(TypeGraph& typeGraph,
 // none of which get their own lambda scope the way a container member does
 // (see emitReconstructValue's Container branch) since there are no
 // toml-supplied bare names here to collide.
-std::string CodeGen::emitReconstructClassValue(Class& cls,
-                                               const std::string& parsedDataExpr,
-                                               size_t& idCounter,
-                                               std::string& code) {
-  std::vector<ReconstructableMember> members = collectReconstructableMembers(cls);
+// Shared by emitReconstructClassValue and emitReconstructClassValueInto -
+// both need the same "decode every reconstructable member's own value"
+// walk; only how the finished object gets materialized from those values
+// differs (build a fresh named value vs. placement-construct into storage
+// some other, in-progress ancestor already handed out - see
+// emitReconstructClassValueInto's own doc for why that second mode exists).
+void CodeGen::collectReconstructFieldExprs(
+    Class& cls,
+    const std::string& parsedDataExpr,
+    size_t& idCounter,
+    std::string& code,
+    std::vector<std::string>& namesOut,
+    std::vector<std::string>& fieldExprsOut) {
+  std::vector<ReconstructableMember> members =
+      collectReconstructableMembers(cls);
   size_t n = members.size();
 
-  std::vector<std::string> fieldExprs(n);
+  namesOut.resize(n);
+  fieldExprsOut.resize(n);
+  for (size_t i = 0; i < n; i++) {
+    namesOut[i] = members[i].name;
+  }
+
   if (n == 1) {
-    fieldExprs[0] =
+    fieldExprsOut[0] =
         emitReconstructValue(*members[0].type, parsedDataExpr, idCounter, code);
-  } else {
-    // ParsedData::Pair holds Lazy fields, which hold a reference member -
-    // that deletes Pair's copy *assignment* (though not construction), so
-    // each nesting level gets its own freshly-initialized, uniquely-named
-    // variable below rather than reusing/reassigning one. first() must be
-    // called before second() at each level - both share the same
-    // underlying iterator, so second() would parse from the wrong offset
-    // if evaluated first.
-    const std::string p = "p" + std::to_string(idCounter++);
-    code += "  auto " + p + "_0 = std::get<oi::exporters::ParsedData::Pair>((" +
-            parsedDataExpr + ").val);\n";
-    for (size_t i = 0; i < n - 1; i++) {
-      fieldExprs[i] = emitReconstructValue(
-          *members[i].type, p + "_" + std::to_string(i) + ".first()",
-          idCounter, code);
-      if (i == n - 2) {
-        fieldExprs[i + 1] = emitReconstructValue(
-            *members[i + 1].type, p + "_" + std::to_string(i) + ".second()",
-            idCounter, code);
-      } else {
-        code += "  auto " + p + "_next_" + std::to_string(i) + " = " + p +
-                "_" + std::to_string(i) + ".second();\n";
-        code += "  auto " + p + "_" + std::to_string(i + 1) +
-                " = std::get<oi::exporters::ParsedData::Pair>(" + p +
-                "_next_" + std::to_string(i) + ".val);\n";
-      }
+    return;
+  }
+
+  // ParsedData::Pair holds Lazy fields, which hold a reference member -
+  // that deletes Pair's copy *assignment* (though not construction), so
+  // each nesting level gets its own freshly-initialized, uniquely-named
+  // variable below rather than reusing/reassigning one. first() must be
+  // called before second() at each level - both share the same
+  // underlying iterator, so second() would parse from the wrong offset
+  // if evaluated first.
+  const std::string p = "p" + std::to_string(idCounter++);
+  code += "  auto " + p + "_0 = std::get<oi::exporters::ParsedData::Pair>((" +
+          parsedDataExpr + ").val);\n";
+  for (size_t i = 0; i < n - 1; i++) {
+    fieldExprsOut[i] =
+        emitReconstructValue(*members[i].type,
+                             p + "_" + std::to_string(i) + ".first()",
+                             idCounter,
+                             code);
+    if (i == n - 2) {
+      fieldExprsOut[i + 1] =
+          emitReconstructValue(*members[i + 1].type,
+                               p + "_" + std::to_string(i) + ".second()",
+                               idCounter,
+                               code);
+    } else {
+      code += "  auto " + p + "_next_" + std::to_string(i) + " = " + p + "_" +
+              std::to_string(i) + ".second();\n";
+      code += "  auto " + p + "_" + std::to_string(i + 1) +
+              " = std::get<oi::exporters::ParsedData::Pair>(" + p + "_next_" +
+              std::to_string(i) + ".val);\n";
     }
   }
+}
+
+std::string CodeGen::emitReconstructClassValue(
+    Class& cls,
+    const std::string& parsedDataExpr,
+    size_t& idCounter,
+    std::string& code) {
+  std::vector<std::string> names;
+  std::vector<std::string> fieldExprs;
+  collectReconstructFieldExprs(
+      cls, parsedDataExpr, idCounter, code, names, fieldExprs);
 
   const std::string resultVar = "c" + std::to_string(idCounter++);
   code += "  " + resolveTypeName(cls) + " " + resultVar + "{\n";
-  for (size_t i = 0; i < n; i++) {
+  for (size_t i = 0; i < names.size(); i++) {
     // std::move, not a bare reference to fieldExprs[i]: most field
     // expressions are already prvalues (a scalar reconstructScalar<T>()
     // call, or another emitReconstruct*'s own IIFE result), for which
@@ -1928,11 +2125,99 @@ std::string CodeGen::emitReconstructClassValue(Class& cls,
     // named local (an lvalue) - needed so a move-only container element
     // (e.g. std::unique_ptr<T>) doesn't hit its deleted copy constructor
     // here.
-    code += "    ." + std::string(members[i].name) + " = std::move(" +
-            fieldExprs[i] + "),\n";
+    code += "    ." + names[i] + " = std::move(" + fieldExprs[i] + "),\n";
   }
   code += "  };\n";
   return resultVar;
+}
+
+// The cycle-capable counterpart to emitReconstructClassValue: instead of
+// building a fresh named value and returning it, placement-constructs
+// directly into storage the caller already allocated and registered (see
+// emitReconstructPointerValue's CycleBreaker branch) *before* this call -
+// required whenever `cls` might be the ancestor a back-edge somewhere
+// inside its own subgraph refers to, since that back-edge needs a stable
+// address to hand out while `cls`'s own fields are still being decoded,
+// which an ordinary "build a value, then return it" expression can't
+// provide (there is no address until the whole expression finishes
+// evaluating). Every field is still decoded exactly the same way
+// (collectReconstructFieldExprs is shared, unchanged) - only the final
+// materialization step differs.
+void CodeGen::emitReconstructClassValueInto(Class& cls,
+                                            const std::string& storagePtrExpr,
+                                            const std::string& parsedDataExpr,
+                                            size_t& idCounter,
+                                            std::string& code) {
+  std::vector<std::string> names;
+  std::vector<std::string> fieldExprs;
+  collectReconstructFieldExprs(
+      cls, parsedDataExpr, idCounter, code, names, fieldExprs);
+
+  code += "  new (" + storagePtrExpr + ") " + resolveTypeName(cls) + "{\n";
+  for (size_t i = 0; i < names.size(); i++) {
+    code += "    ." + names[i] + " = std::move(" + fieldExprs[i] + "),\n";
+  }
+  code += "  };\n";
+}
+
+// Returns the name of a generated, reusable function that placement-
+// constructs `cls` from a `ParsedData` (the exact same job
+// emitReconstructClassValueInto does inline) - generating it, into
+// cycleReconstructHelpersCode_, the first time `cls` is asked for, and
+// simply returning the cached name on every later call.
+//
+// This indirection exists for one reason: a cycle-capable Class (see
+// cycleCapableClasses_) can be reached again from *within its own* field
+// decoding - that's the entire point of the mechanism (a genuine back-edge,
+// or another ordinary edge to an already-registered instance, resolved via
+// emitReconstructPointerValue's cycle-capable/wrapped-edge branches). If
+// each such reference *inlined* emitReconstructClassValueInto's output
+// directly (as an earlier version of this code did), generating `cls`'s
+// own decode logic would recursively ask to generate `cls`'s own decode
+// logic again, unboundedly - the type graph has no notion of "this edge
+// has already been expanded N times" to ever stop it, since a cycle-
+// capable type's self-referential member is the *same* edge regardless of
+// how deep the recursion has gone. That's this project's own code hitting
+// the same class of problem #293 was originally about (an eagerly-
+// expanded structure with no way to terminate a genuine cycle), just at
+// the code-generation level instead of the generated code's own type
+// system.
+//
+// The fix mirrors the write side's own: cycleReconstructHelperNames_ is
+// populated with `cls`'s new helper name *before* emitReconstructClassValueInto
+// is called to generate its body (not after) - so a recursive request for
+// the same `cls`, arriving from partway through generating its own body,
+// finds the cache entry already there and simply emits a call to it
+// instead of asking to generate it again. Once `cls`'s helper is a real,
+// named C++ function, further recursion through it is ordinary runtime
+// function calls - ordinary, ungated recursive functions are ordinary,
+// legal C++, the compiler doesn't need to see the whole call chain
+// unrolled at compile time the way a type alias would.
+const std::string& CodeGen::getOrEmitCycleReconstructHelper(Class& cls) {
+  auto it = cycleReconstructHelperNames_.find(&cls);
+  if (it != cycleReconstructHelperNames_.end())
+    return it->second;
+
+  const std::string typeName = resolveTypeName(cls);
+  const std::string helperName =
+      "__oi_reconstruct_into_" +
+      std::to_string(cycleReconstructHelperCounter_++);
+  auto [insertedIt, inserted] =
+      cycleReconstructHelperNames_.emplace(&cls, helperName);
+
+  const std::string signature =
+      "void " + helperName + "(" + typeName +
+      "* __oi_storage, const oi::exporters::ParsedData& __oi_data, "
+      "__oi_registries& __oi_reg)";
+  cycleReconstructHelpersCode_ += signature + ";\n";
+
+  size_t idCounter = 0;
+  std::string body;
+  emitReconstructClassValueInto(
+      cls, "__oi_storage", "__oi_data", idCounter, body);
+
+  cycleReconstructHelpersCode_ += signature + " {\n" + body + "}\n\n";
+  return insertedIt->second;
 }
 
 // Reconstructs a raw pointer (or reference - see the two call sites in
@@ -1953,12 +2238,7 @@ std::string CodeGen::emitReconstructClassValue(Class& cls,
 // __oi_alias_registry_N mechanism emitAliasRegistries declares for
 // alias-eligible containers, just with its own "raw-pointer|..." key
 // namespace and a plain `Pointee*` (not an owning container type) as the
-// registry's value type - see emitAliasRegistries' own doc for why. A
-// lookup miss on a non-null, not-present address still means a cycle (the
-// address was seen, via the write side's own ctx.pointers.add dedup, but
-// nothing has *finished* reconstructing it yet) - not yet supported,
-// same as before, just now only for the genuinely unresolvable case
-// rather than for every repeat.
+// registry's value type - see emitAliasRegistries' own doc for why.
 //
 // Ownership: unlike std::unique_ptr/std::shared_ptr, a raw pointer's type
 // carries no destruction machinery at all - there is no hook to ever run
@@ -1967,20 +2247,81 @@ std::string CodeGen::emitReconstructClassValue(Class& cls,
 // "owning" in the first place. Heap-allocates and *deliberately* never
 // frees: a documented leak, not an oversight - see
 // docs/object-capture-initial-thoughts.md.
+//
+// Three cases, in order of how much this function can actually do with
+// them:
+//
+//  - This edge is itself the one BreakCycles rewrote (pointeeType is
+//    directly a CycleBreaker): its content, when present, is always empty
+//    (CycleBreaker's own TypeHandler is Unit - see
+//    genCycleBreakerTypeHandler) - there is no field data behind this edge
+//    to decode, ever, regardless of whether the write side's dedup saw this
+//    address for the first time or not. The *only* useful thing this edge
+//    ever carries is the raw address, purely to look up whatever *other*,
+//    unwrapped edge already registered (or is still registering) the real
+//    object at that address - see the "cycle-capable" case below, which is
+//    what actually does that registering. Never allocates or constructs
+//    anything itself.
+//
+//  - The real pointee type is cycle-capable (cycleCapableClasses_) but
+//    *this* edge is an ordinary one - e.g. the very first edge that reaches
+//    it, before it was "on path" for BreakCycles to ever rewrite anything
+//    further down. Allocates raw, uninitialized storage and registers its
+//    address in the alias registry *before* decoding any fields (not
+//    after, like the plain case below) - see emitReconstructClassValueInto
+//    - so a genuine back-edge encountered lower in the recursion (the case
+//    above, however many hops down it turns out to be) finds this instance
+//    already present. Only valid because nothing ever *dereferences*
+//    through a registry hit during reconstruction itself - only the raw
+//    pointer value is ever stored or handed back, which is safe even
+//    before the pointee object's lifetime has formally begun.
+//
+//  - Plain: build the pointee's value first (the original, unchanged
+//    "build a value, then new() it" approach), then register its address.
+//    Correct as long as nothing else can need this address before this
+//    line runs - true here because nothing reachable from this Class was
+//    ever flagged as cycle-capable at all.
+//
+// A lookup miss on a non-null, not-present/not-registered address means
+// different things for the plain case versus the other two. For the plain
+// case, it's the same "not yet supported" this always was - the write
+// side's own dedup means the address was seen before, but nothing here
+// ever registers early, so if nothing *finished* reconstructing it,
+// something is genuinely wrong (or points at the pre-existing
+// PointerHashSet-exhaustion limitation). For the other two, early
+// registration changes what a miss can mean: every possible target
+// registers itself the moment it starts reconstructing, so a miss can now
+// only mean one thing - this address is the reconstruction root's own,
+// which is never registered anywhere (see the thrown message for why
+// that's a real, not-yet-lifted limitation, not a bug).
 std::string CodeGen::emitReconstructPointerValue(Type& pointeeType,
                                                  const std::string& v,
                                                  size_t& idCounter,
                                                  std::string& code) {
-  code += "  auto " + v + "_ptr_pair = std::get<oi::exporters::ParsedData::"
-          "Pair>(" + v + "_data.val);\n";
+  code += "  auto " + v +
+          "_ptr_pair = std::get<oi::exporters::ParsedData::"
+          "Pair>(" +
+          v + "_data.val);\n";
   code += "  auto " + v + "_addr_data = " + v + "_ptr_pair.first();\n";
-  code += "  auto " + v + "_addr = std::get<oi::exporters::ParsedData::"
-          "VarInt>(" + v + "_addr_data.val).value;\n";
-  code += "  auto " + v + "_sum = std::get<oi::exporters::ParsedData::"
-          "Sum>(" + v + "_ptr_pair.second().val);\n";
+  code += "  auto " + v +
+          "_addr = std::get<oi::exporters::ParsedData::"
+          "VarInt>(" +
+          v + "_addr_data.val).value;\n";
+  code += "  auto " + v +
+          "_sum = std::get<oi::exporters::ParsedData::"
+          "Sum>(" +
+          v + "_ptr_pair.second().val);\n";
   code += "  bool " + v + "_present = " + v + "_sum.index == 1;\n";
 
-  const std::string pointeeTypeName = resolveTypeName(pointeeType);
+  bool isWrappedEdge = dynamic_cast<CycleBreaker*>(&pointeeType) != nullptr;
+  Type& realPointeeType = resolvePointeeForReconstruct(pointeeType);
+  auto* realClass = dynamic_cast<Class*>(&realPointeeType);
+  // Type-wide, not edge-wide (see cycleCapableClasses_'s own doc): this
+  // Class might be cycle-capable even though *this specific* edge is an
+  // entirely ordinary one - e.g. the very first edge that reaches it,
+  // before it was "on path" for BreakCycles to ever rewrite.
+  bool cycleCapable = realClass && cycleCapableClasses_.contains(realClass);
+  const std::string pointeeTypeName = resolveTypeName(realPointeeType);
   const std::string key = "raw-pointer|" + pointeeTypeName;
   auto it = aliasRegistryIndices_.find(key);
   if (it == aliasRegistryIndices_.end()) {
@@ -1989,31 +2330,121 @@ std::string CodeGen::emitReconstructPointerValue(Type& pointeeType,
     // in, using the same key, before any member is reconstructed.
     throw std::runtime_error(
         "CodeGen::emitReconstructPointerValue: no alias registry declared "
-        "for pointee " + pointeeTypeName);
+        "for pointee " +
+        pointeeTypeName);
   }
   const std::string registryVar =
-      "__oi_alias_registry_" + std::to_string(it->second);
+      "__oi_reg.field_" + std::to_string(it->second);
 
   const std::string resultVar = v + "_result";
-  code += "  " + pointeeTypeName + "* " + resultVar + " = nullptr;\n";
-  code += "  if (" + v + "_present) {\n";
 
-  std::string pointeeCode;
-  std::string pointeeExpr = emitReconstructValue(
-      pointeeType, v + "_sum.value()", idCounter, pointeeCode);
-  code += pointeeCode;
-  code += "    " + resultVar + " = new " + pointeeTypeName + "(" +
-          pointeeExpr + ");\n";
-  code += "    " + registryVar + "[" + v + "_addr] = " + resultVar + ";\n";
+  const std::string rootCycleMessage =
+      "oi::reconstruct: " + pointeeTypeName +
+      " at address \" + std::to_string(" + v +
+      "_addr) + \" closes a "
+      "reference cycle back onto the object being reconstructed (the "
+      "root itself). oi::reconstruct<T>() returns T by value, so this "
+      "can't be represented today - any move or copy on return would "
+      "leave this self-pointer dangling. Reconstructing this shape needs "
+      "a caller-owns-the-storage entry point (a planned "
+      "oi::reconstructInto<T>(T&, bytes) - not yet implemented). See "
+      "docs/object-capture-initial-thoughts.md's cyclic-reconstruction "
+      "notes, not part of this repo.";
+
+  if (isWrappedEdge) {
+    // This member's own declared type (see genDefsClass, mirroring the
+    // type graph verbatim) is the *wrapped* OICycleBreaker<Real>* - not
+    // the real Real* the alias registry actually stores (registries are
+    // shared across every edge to the same real type, wrapped or not, see
+    // emitAliasRegistries). static_cast is safe: OICycleBreaker<Real> is
+    // an empty subclass of Real with identical layout (see its own doc in
+    // Types.h) - this is a same-address reinterpretation, not a real
+    // downcast.
+    const std::string wrappedTypeName = resolveTypeName(pointeeType);
+    code += "  " + wrappedTypeName + "* " + resultVar + " = nullptr;\n";
+
+    if (config_.features[Feature::CaptureBytes] && realClass) {
+      // capture-bytes on: genCycleBreakerTypeHandler's getSizeType
+      // recursively captured the real pointee's own content into a
+      // nested, length-prefixed blob (a DynBytes payload) rather than
+      // nothing - decode that blob the same way the root itself gets
+      // decoded from raw bytes (ParsedData::parse against the real
+      // type's own describe shape), just one level deeper, and register
+      // the result *before* decoding its fields (matching the
+      // cycle-capable branch above) so a genuine back-edge nested inside
+      // it resolves correctly.
+      code += "  if (" + v + "_present) {\n";
+      code += "    auto " + v +
+              "_nested_bytes = std::get<oi::exporters::ParsedData::"
+              "DynBytes>(" +
+              v + "_sum.value().val).value;\n";
+      code +=
+          "    auto " + v + "_nested_it = " + v + "_nested_bytes.cbegin();\n";
+      code += "    auto " + v +
+              "_nested_data = oi::exporters::ParsedData::parse(" + v +
+              "_nested_it, TypeHandler<Ctx, " + pointeeTypeName +
+              ">::type::describe);\n";
+      code += "    " + resultVar + " = static_cast<" + wrappedTypeName +
+              "*>(::operator new(sizeof(" + pointeeTypeName + ")));\n";
+      code += "    " + registryVar + "[" + v + "_addr] = static_cast<" +
+              pointeeTypeName + "*>(" + resultVar + ");\n";
+      const std::string& helperName =
+          getOrEmitCycleReconstructHelper(*realClass);
+      code += "    " + helperName + "(static_cast<" + pointeeTypeName + "*>(" +
+              resultVar + "), " + v + "_nested_data, __oi_reg);\n";
+      code += "  } else if (" + v + "_addr != 0) {\n";
+    } else {
+      // capture-bytes off (or a shape BreakCycles can wrap but this
+      // increment doesn't decode - see realClass's own null check above,
+      // which should be unreachable per BreakCycles' own scope): no field
+      // data ever exists behind this edge - present or not, always just a
+      // registry lookup keyed by the raw address.
+      code += "  if (" + v + "_addr != 0) {\n";
+    }
+    code += "    auto " + v + "_alias_it = " + registryVar + ".find(" + v +
+            "_addr);\n";
+    code += "    if (" + v + "_alias_it == " + registryVar + ".end()) {\n";
+    code += "      throw std::runtime_error(\"" + rootCycleMessage + "\");\n";
+    code += "    }\n";
+    code += "    " + resultVar + " = static_cast<" + wrappedTypeName + "*>(" +
+            v + "_alias_it->second);\n";
+    code += "  }\n";
+    return resultVar;
+  }
+
+  code += "  " + pointeeTypeName + "* " + resultVar + " = nullptr;\n";
+
+  code += "  if (" + v + "_present) {\n";
+  if (cycleCapable) {
+    code += "    " + resultVar + " = static_cast<" + pointeeTypeName +
+            "*>(::operator new(sizeof(" + pointeeTypeName + ")));\n";
+    code += "    " + registryVar + "[" + v + "_addr] = " + resultVar + ";\n";
+    const std::string& helperName = getOrEmitCycleReconstructHelper(*realClass);
+    code += "    " + helperName + "(" + resultVar + ", " + v +
+            "_sum.value(), __oi_reg);\n";
+  } else {
+    std::string pointeeCode;
+    std::string pointeeExpr = emitReconstructValue(
+        realPointeeType, v + "_sum.value()", idCounter, pointeeCode);
+    code += pointeeCode;
+    code += "    " + resultVar + " = new " + pointeeTypeName + "(" +
+            pointeeExpr + ");\n";
+    code += "    " + registryVar + "[" + v + "_addr] = " + resultVar + ";\n";
+  }
+
   code += "  } else if (" + v + "_addr != 0) {\n";
   code += "    auto " + v + "_alias_it = " + registryVar + ".find(" + v +
           "_addr);\n";
   code += "    if (" + v + "_alias_it == " + registryVar + ".end()) {\n";
-  code += "      throw std::runtime_error(\"oi::reconstruct: " +
-          pointeeTypeName +
-          "* - a cycle detected (a captured pointer address was reused "
-          "but nothing has finished reconstructing it yet) - not yet "
-          "supported\");\n";
+  if (cycleCapable) {
+    code += "      throw std::runtime_error(\"" + rootCycleMessage + "\");\n";
+  } else {
+    code +=
+        "      throw std::runtime_error(\"oi::reconstruct: " + pointeeTypeName +
+        "* - a cycle detected (a captured pointer address was reused "
+        "but nothing has finished reconstructing it yet) - not yet "
+        "supported\");\n";
+  }
   code += "    }\n";
   code += "    " + resultVar + " = " + v + "_alias_it->second;\n";
   code += "  }\n";
@@ -2153,7 +2584,8 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     throw std::runtime_error(
         "CodeGen::emitReconstructValue: " + info.typeName +
         " has `codegen.reconstruct` but an unrecognized or missing "
-        "`codegen.reconstruct_kind` ('" + info.codegen.reconstructKind +
+        "`codegen.reconstruct_kind` ('" +
+        info.codegen.reconstructKind +
         "') - expected \"list\", \"bytes\", \"map\", or \"pointer\"");
   }
   if (cont->templateParams.empty()) {
@@ -2189,8 +2621,8 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
   // to compile. Scoping them inside this lambda, which already exists
   // per container instance, fixes that for free.
   const std::string resultVar = v + "_result";
-  code += "  auto " + resultVar + " = [&]() -> " + resolveTypeName(*cont) +
-          " {\n";
+  code +=
+      "  auto " + resultVar + " = [&]() -> " + resolveTypeName(*cont) + " {\n";
 
   // Walk this container's own processor chain - exactly the same
   // "discard everything but the last, but drain every discarded one
@@ -2211,23 +2643,25 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
   // point it's invoked, rather than re-invoked later.
   std::string lastVal = v + "_data";
   if (n > 1) {
-    code += "  auto " + v + "_pair_0 = std::get<oi::exporters::ParsedData::"
-            "Pair>(" + lastVal + ".val);\n";
+    code += "  auto " + v +
+            "_pair_0 = std::get<oi::exporters::ParsedData::"
+            "Pair>(" +
+            lastVal + ".val);\n";
     code += "  auto " + v + "_discarded_0 = " + v + "_pair_0.first();\n";
     code += "  oi::exporters::drainParsedData(" + v + "_discarded_0);\n";
     for (size_t i = 0; i < n - 1; i++) {
       if (i == n - 2) {
         lastVal = v + "_last";
-        code += "  auto " + lastVal + " = " + v + "_pair_" +
-                std::to_string(i) + ".second();\n";
+        code += "  auto " + lastVal + " = " + v + "_pair_" + std::to_string(i) +
+                ".second();\n";
       } else {
         code += "  auto " + v + "_next_" + std::to_string(i) + " = " + v +
                 "_pair_" + std::to_string(i) + ".second();\n";
         code += "  auto " + v + "_pair_" + std::to_string(i + 1) +
-                " = std::get<oi::exporters::ParsedData::Pair>(" + v +
-                "_next_" + std::to_string(i) + ".val);\n";
-        code += "  auto " + v + "_discarded_" + std::to_string(i + 1) +
-                " = " + v + "_pair_" + std::to_string(i + 1) + ".first();\n";
+                " = std::get<oi::exporters::ParsedData::Pair>(" + v + "_next_" +
+                std::to_string(i) + ".val);\n";
+        code += "  auto " + v + "_discarded_" + std::to_string(i + 1) + " = " +
+                v + "_pair_" + std::to_string(i + 1) + ".first();\n";
         code += "  oi::exporters::drainParsedData(" + v + "_discarded_" +
                 std::to_string(i + 1) + ");\n";
       }
@@ -2235,8 +2669,10 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
   }
 
   if (info.codegen.reconstructKind == "list") {
-    code += "  auto " + v + "_list = std::get<oi::exporters::ParsedData::"
-            "List>(" + lastVal + ".val);\n";
+    code += "  auto " + v +
+            "_list = std::get<oi::exporters::ParsedData::"
+            "List>(" +
+            lastVal + ".val);\n";
     code += "  size_t length = " + v + "_list.length;\n";
 
     // Recurse for the element type - its own decode statements land
@@ -2247,7 +2683,9 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     std::string nextElemCode;
     std::string nextElemExpr =
         emitReconstructValue(cont->templateParams[0].type(),
-                             v + "_list.values()", idCounter, nextElemCode);
+                             v + "_list.values()",
+                             idCounter,
+                             nextElemCode);
     code += "  auto nextElement = [&]() {\n";
     code += nextElemCode;
     code += "    return " + nextElemExpr + ";\n";
@@ -2263,10 +2701,14 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     // address was already captured elsewhere" (aliasing, for
     // std::shared_ptr, or a cycle's back-edge, for either) - see
     // docs/object-capture-initial-thoughts.md.
-    code += "  auto " + v + "_addr = std::get<oi::exporters::ParsedData::"
-            "VarInt>(" + v + "_discarded_0.val).value;\n";
-    code += "  auto " + v + "_sum = std::get<oi::exporters::ParsedData::"
-            "Sum>(" + lastVal + ".val);\n";
+    code += "  auto " + v +
+            "_addr = std::get<oi::exporters::ParsedData::"
+            "VarInt>(" +
+            v + "_discarded_0.val).value;\n";
+    code += "  auto " + v +
+            "_sum = std::get<oi::exporters::ParsedData::"
+            "Sum>(" +
+            lastVal + ".val);\n";
     code += "  bool present = " + v + "_sum.index == 1;\n";
 
     if (info.codegen.reconstructUsesAliasRegistry) {
@@ -2281,8 +2723,8 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
       // toml text) is responsible for calling them and deciding what a
       // lookupAlias() miss means (today: always a cycle, so always an
       // error - see e.g. shrd_ptr_type.toml).
-      std::string key = info.typeName + "|" +
-                        resolveTypeName(cont->templateParams[0].type());
+      std::string key =
+          info.typeName + "|" + resolveTypeName(cont->templateParams[0].type());
       auto it = aliasRegistryIndices_.find(key);
       if (it == aliasRegistryIndices_.end()) {
         // Should be unreachable: emitAliasRegistries walks the exact same
@@ -2294,7 +2736,7 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
             resolveTypeName(cont->templateParams[0].type()));
       }
       const std::string registryVar =
-          "__oi_alias_registry_" + std::to_string(it->second);
+          "__oi_reg.field_" + std::to_string(it->second);
       code += "  uint64_t address = " + v + "_addr;\n";
       code += "  auto registerAlias = [&](" + resolveTypeName(*cont) +
               " value) {\n";
@@ -2304,7 +2746,8 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
       code += "  auto lookupAlias = [&]() -> std::optional<" +
               resolveTypeName(*cont) + "> {\n";
       code += "    auto __oi_it = " + registryVar + ".find(address);\n";
-      code += "    if (__oi_it == " + registryVar + ".end()) return "
+      code += "    if (__oi_it == " + registryVar +
+              ".end()) return "
               "std::nullopt;\n";
       code += "    return __oi_it->second;\n";
       code += "  };\n";
@@ -2313,10 +2756,10 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
       // alias by construction), so a repeated non-null address can only
       // mean a cycle - always an error.
       code += "  if (!present && " + v + "_addr != 0) {\n";
-      code += "    throw std::runtime_error(\"oi::reconstruct: " +
-              info.typeName +
-              " - a cycle detected (a captured pointer address was "
-              "reused) - not yet supported\");\n";
+      code +=
+          "    throw std::runtime_error(\"oi::reconstruct: " + info.typeName +
+          " - a cycle detected (a captured pointer address was "
+          "reused) - not yet supported\");\n";
       code += "  }\n";
     }
 
@@ -2327,9 +2770,11 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     // call pointeeVal() at all when `present` is false - there is nothing
     // to drain.
     std::string pointeeCode;
-    std::string pointeeExpr = emitReconstructValue(
-        cont->templateParams[0].type(), v + "_sum.value()", idCounter,
-        pointeeCode);
+    std::string pointeeExpr =
+        emitReconstructValue(cont->templateParams[0].type(),
+                             v + "_sum.value()",
+                             idCounter,
+                             pointeeCode);
     code += "  auto pointeeVal = [&]() {\n";
     code += pointeeCode;
     code += "    return " + pointeeExpr + ";\n";
@@ -2341,32 +2786,37 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     // (not something emitReconstructValue's generic Type-based recursion
     // handles - a wire-level Pair isn't a reconstructable C++ type on its
     // own) before recursing for the key and the value individually.
-    code += "  auto " + v + "_list = std::get<oi::exporters::ParsedData::"
-            "List>(" + lastVal + ".val);\n";
+    code += "  auto " + v +
+            "_list = std::get<oi::exporters::ParsedData::"
+            "List>(" +
+            lastVal + ".val);\n";
     code += "  size_t length = " + v + "_list.length;\n";
 
     std::string keyCode, valueCode;
-    std::string keyExpr = emitReconstructValue(
-        cont->templateParams[0].type(), v + "_entry.first()", idCounter,
-        keyCode);
-    std::string valueExpr = emitReconstructValue(
-        cont->templateParams[1].type(), v + "_entry.second()", idCounter,
-        valueCode);
+    std::string keyExpr = emitReconstructValue(cont->templateParams[0].type(),
+                                               v + "_entry.first()",
+                                               idCounter,
+                                               keyCode);
+    std::string valueExpr = emitReconstructValue(cont->templateParams[1].type(),
+                                                 v + "_entry.second()",
+                                                 idCounter,
+                                                 valueCode);
     code += "  auto nextEntry = [&]() {\n";
     code += "    auto " + v +
             "_entry = std::get<oi::exporters::ParsedData::Pair>(" + v +
             "_list.values().val);\n";
     code += keyCode;
     code += valueCode;
-    code += "    return std::make_pair(" + keyExpr + ", " + valueExpr +
-            ");\n";
+    code += "    return std::make_pair(" + keyExpr + ", " + valueExpr + ");\n";
     code += "  };\n";
   } else {
     // "bytes": the whole reconstructable content is one contiguous
     // captured byte blob (e.g. a string's characters), not a per-element
     // list - nothing left to decode, just hand the raw bytes over.
-    code += "  auto contentBytes = std::get<oi::exporters::ParsedData::"
-            "DynBytes>(" + lastVal + ".val).value;\n";
+    code +=
+        "  auto contentBytes = std::get<oi::exporters::ParsedData::"
+        "DynBytes>(" +
+        lastVal + ".val).value;\n";
   }
 
   // T0 (and T1, for a "map"-kind container) must mean *this* container's
@@ -2376,11 +2826,12 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
   // element string) would incorrectly see the outermost container's T0
   // instead of its own, since bare `T0`/`T1` are otherwise just
   // unqualified names looked up in the enclosing scope.
-  code += "    using T0 = " +
-          resolveTypeName(cont->templateParams[0].type()) + ";\n";
+  code += "    using T0 = " + resolveTypeName(cont->templateParams[0].type()) +
+          ";\n";
   if (cont->templateParams.size() >= 2) {
-    code += "    using T1 = " +
-            resolveTypeName(cont->templateParams[1].type()) + ";\n";
+    code +=
+        "    using T1 = " + resolveTypeName(cont->templateParams[1].type()) +
+        ";\n";
   }
   code += (boost::format(info.codegen.reconstruct) % info.typeName).str();
   code += "\n  }();\n";
@@ -2400,7 +2851,8 @@ void CodeGen::generateReconstructContainerBody(TypeGraph& typeGraph,
   }
 
   const std::string containerType = resolveTypeName(container);
-  const std::string t0Name = resolveTypeName(container.templateParams[0].type());
+  const std::string t0Name =
+      resolveTypeName(container.templateParams[0].type());
 
   // The container's full wire shape, exactly as genContainerTypeHandler
   // builds it for the write side (see CodeGen.cpp above) - a right-nested
@@ -2428,31 +2880,27 @@ void CodeGen::generateReconstructContainerBody(TypeGraph& typeGraph,
   }
   shapeType += std::string(n - 1, '>');
 
-  code += "extern \"C\" " + containerType + " " + typeToHash +
-          "(std::span<const uint8_t> bytes) {\n";
-  emitAliasRegistries(typeGraph, code);
-  code += "  using DB = int;\n";
-  code += "  struct OIReconstructFakeCtx { using DataBuffer = DB; };\n";
-  code += "  using Ctx = OIReconstructFakeCtx;\n";
-  // T0 (and T1, for a map) is the outermost container's own template
-  // parameter(s) - needed as bare names for its processor type strings
-  // (e.g. seq_type.toml's `typename TypeHandler<Ctx, T0>::type`, or
-  // std_map_type.toml's ...<Ctx, T0>/...<Ctx, T1>) to resolve; a nested
-  // element's own T0/T1 (if it's itself a container) is handled the same
-  // way, but as a local inside emitReconstructValue's own lambda scope,
-  // not here.
-  code += "  using T0 = " + t0Name + ";\n";
-  if (container.templateParams.size() >= 2) {
-    code += "  using T1 = " +
-            resolveTypeName(container.templateParams[1].type()) + ";\n";
-  }
+  // DB/Ctx/TypeHandler/etc need to be in scope at namespace scope, not
+  // local to the main function below - emitted into `code` directly,
+  // before cycleReconstructHelpersCode_, for the same reason
+  // generateReconstructClassBody's identical block is: a cycle-capable
+  // element's own reusable helper function (see
+  // getOrEmitCycleReconstructHelper) is a separate, namespace-scope
+  // function, not nested inside the main function, so it needs these
+  // visible before its own definition too. T0/T1 (below) stay local to
+  // the main function, unlike these - they're specific to *this*
+  // container root, not something a nested cycle-capable element's own
+  // helper would ever need.
+  code += "using DB = int;\n";
+  code += "struct OIReconstructFakeCtx { using DataBuffer = DB; };\n";
+  code += "using Ctx = OIReconstructFakeCtx;\n";
   // TypeHandler and oi_capture_bytes are always emitted inside
   // namespace OIInternal { namespace {...} } - both by generate() (the
   // combined case) and by generateReconstruct() itself (the standalone
   // case, which wraps its own FuncGen::DefineBasicTypeHandlers call the
   // same way) specifically so these lines resolve identically either way.
-  code += "  using OIInternal::TypeHandler;\n";
-  code += "  using OIInternal::oi_capture_bytes;\n";
+  code += "using OIInternal::TypeHandler;\n";
+  code += "using OIInternal::oi_capture_bytes;\n";
   // A map-shaped container's processor type is
   // std::conditional_t<captureKeys, <uses CaptureKeyHandler>, <doesn't>>
   // (see std_map_type.toml) - std::conditional_t requires *both* branches
@@ -2460,28 +2908,57 @@ void CodeGen::generateReconstructContainerBody(TypeGraph& typeGraph,
   // (unlike `if constexpr`, it doesn't discard the unused branch from
   // lookup), so CaptureKeyHandler has to be reachable here even though
   // captureKeys is always false in practice for reconstruction.
-  code += "  using OIInternal::CaptureKeyHandler;\n";
+  code += "using OIInternal::CaptureKeyHandler;\n";
+
+  // Built separately from `code`, not appended to it directly - see
+  // generateReconstructClassBody's identical pattern and comment for why:
+  // a cycle-capable element reachable from this container gets its own
+  // reusable helper function generated into cycleReconstructHelpersCode_
+  // *during* the emitReconstructValue call below, which has to be defined
+  // before this function is.
+  std::string mainFnCode;
+
+  mainFnCode += "extern \"C\" " + containerType + " " + typeToHash +
+                "(std::span<const uint8_t> bytes) {\n";
+  emitAliasRegistries(typeGraph, mainFnCode);
+  // T0 (and T1, for a map) is the outermost container's own template
+  // parameter(s) - needed as bare names for its processor type strings
+  // (e.g. seq_type.toml's `typename TypeHandler<Ctx, T0>::type`, or
+  // std_map_type.toml's ...<Ctx, T0>/...<Ctx, T1>) to resolve; a nested
+  // element's own T0/T1 (if it's itself a container) is handled the same
+  // way, but as a local inside emitReconstructValue's own lambda scope,
+  // not here.
+  mainFnCode += "  using T0 = " + t0Name + ";\n";
+  if (container.templateParams.size() >= 2) {
+    mainFnCode +=
+        "  using T1 = " + resolveTypeName(container.templateParams[1].type()) +
+        ";\n";
+  }
   // A map-shaped container's content processor is conditioned on
   // captureKeys (see std_map_type.toml) - a member of that container's
   // own TypeHandler specialization normally, invisible here since
   // shapeType (below) reuses the processor text outside that class body.
   // Reconstruction never enables key capture, so this is always false in
   // practice, but reads the real field rather than hard-coding that.
-  code += "  constexpr bool captureKeys = " +
-          std::string(container.containerInfo_.captureKeys ? "true"
-                                                            : "false") +
-          ";\n";
-  code += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
-  code += "  auto it = vec.cbegin();\n";
+  mainFnCode +=
+      "  constexpr bool captureKeys = " +
+      std::string(container.containerInfo_.captureKeys ? "true" : "false") +
+      ";\n";
+  mainFnCode += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
+  mainFnCode += "  auto it = vec.cbegin();\n";
 
   size_t idCounter = 0;
   std::string valueExpr = emitReconstructValue(
       container,
       "oi::exporters::ParsedData::parse(it, " + shapeType + "::describe)",
-      idCounter, code);
+      idCounter,
+      mainFnCode);
 
-  code += "  return " + valueExpr + ";\n";
-  code += "}\n";
+  mainFnCode += "  return " + valueExpr + ";\n";
+  mainFnCode += "}\n";
+
+  code += cycleReconstructHelpersCode_;
+  code += mainFnCode;
 }
 
 void CodeGen::generateReconstruct(TypeGraph& typeGraph,
@@ -2513,6 +2990,7 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
   code += "#include <oi/exporters/ParsedData.h>\n";
   code += "#include <oi/types/dy.h>\n";
   code += "#include <cstdint>\n";
+  code += "#include <new>\n";
   code += "#include <optional>\n";
   code += "#include <span>\n";
   code += "#include <stdexcept>\n";
@@ -2548,6 +3026,20 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
     code += "using oi::exporters::ParsedData;\n";
     code += "using namespace oi::exporters;\n";
     FuncGen::DefineJitLog(code, config_.features);
+
+    if (typeGraphHasCycleBreaker(typeGraph)) {
+      // genCycleBreakerTypeHandler's getSizeType body references
+      // __oi_cycle_breaker_nested_ctx/BackInserter by name - even though
+      // reconstruction never actually *calls* getSizeType (only ::type/
+      // ::describe), that reference is non-dependent on Ctx, so it's still
+      // checked when TypeHandler<Ctx, OICycleBreaker<T>> is defined, not
+      // deferred to whenever/whether getSizeType is ever instantiated (see
+      // genCycleBreakerTypeHandler's own doc). Fully-qualified as
+      // oi::detail::DataBuffer::BackInserter throughout, so no `using
+      // namespace oi::detail` is needed here.
+      FuncGen::DefineBackInserterDataBuffer(code);
+      defineCycleBreakerCaptureSupport(code);
+    }
   }
 
   if (container) {
