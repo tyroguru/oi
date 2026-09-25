@@ -143,6 +143,10 @@ class CodeGen {
                                    const std::string& parsedDataExpr,
                                    size_t& idCounter,
                                    std::string& code);
+  std::string emitReconstructPointerValue(type_graph::Type& pointeeType,
+                                          const std::string& v,
+                                          size_t& idCounter,
+                                          std::string& code);
   void emitReconstructTypeHandlerSupport(type_graph::TypeGraph& typeGraph,
                                          std::string& code);
   void emitAliasRegistries(type_graph::TypeGraph& typeGraph,

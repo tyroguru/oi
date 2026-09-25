@@ -58,8 +58,10 @@ using type_graph::Incomplete;
 using type_graph::KeyCapture;
 using type_graph::Member;
 using type_graph::NameGen;
+using type_graph::Pointer;
 using type_graph::Primitive;
 using type_graph::Prune;
+using type_graph::Reference;
 using type_graph::RemoveMembers;
 using type_graph::RemoveTopLevelPointer;
 using type_graph::TemplateParam;
@@ -1439,16 +1441,30 @@ std::string resolveTypeName(Type& t) {
     return name + ">";
   }
 
+  // A raw pointer - unlike every other case above, this doesn't need
+  // OIInternal:: qualification itself (it's not a declared type of its
+  // own), but its pointee might, so this recurses rather than reading a
+  // cached name the way Class/Enum do. Pointer itself is a narrow case
+  // (effectively only a C++ reference to an incomplete type - see
+  // ClangTypeParser::enumerateReference); an ordinary chased T* member
+  // arrives as a Reference node instead (see
+  // ClangTypeParser::enumeratePointer), which shares the exact same
+  // pointeeType()-bearing interface and naming convention.
+  if (auto* ptr = dynamic_cast<Pointer*>(&resolved))
+    return resolveTypeName(ptr->pointeeType()) + "*";
+  if (auto* ref = dynamic_cast<Reference*>(&resolved))
+    return resolveTypeName(ref->pointeeType()) + "*";
+
   throw std::runtime_error(
       "CodeGen::resolveTypeName: " + resolved.name() +
-      " is neither a scalar, an enum, a trivially-copyable union, nor a "
-      "container - cannot name its reconstructed type");
+      " is neither a scalar, an enum, a trivially-copyable union, a "
+      "container, nor a pointer - cannot name its reconstructed type");
 }
 
 struct ReconstructableMember {
   std::string_view name;
   Type* type;  // already unwrapped past any Typedef - Primitive, Enum,
-               // Class, or Container
+               // Class, Container, or Pointer
 };
 
 }  // namespace
@@ -1495,14 +1511,15 @@ std::vector<ReconstructableMember> collectReconstructableMembers(
     Type& resolved = unwrapTypedefs(member.type());
     if (!dynamic_cast<Primitive*>(&resolved) &&
         !dynamic_cast<Enum*>(&resolved) && !dynamic_cast<Class*>(&resolved) &&
-        !dynamic_cast<Container*>(&resolved)) {
+        !dynamic_cast<Container*>(&resolved) &&
+        !dynamic_cast<Pointer*>(&resolved) &&
+        !dynamic_cast<Reference*>(&resolved)) {
       throw std::runtime_error(
           "CodeGen::generateReconstructClass: member " + cls.name() + "::" +
           member.name +
-          " is neither a scalar, an enum, a class, nor a reconstructable "
-          "container - not yet supported (see "
-          "docs/object-capture-initial-thoughts.md - pointer fixup is not "
-          "yet implemented)");
+          " is neither a scalar, an enum, a class, a reconstructable "
+          "container, nor a pointer - not yet supported (see "
+          "docs/object-capture-initial-thoughts.md)");
     }
 
     members.push_back({.name = member.name, .type = &resolved});
@@ -1764,6 +1781,64 @@ std::string CodeGen::emitReconstructClassValue(Class& cls,
   return resultVar;
 }
 
+// Reconstructs a raw pointer (or reference - see the two call sites in
+// emitReconstructValue) to `pointeeType`, decoded from `v`'s own already-
+// materialized ParsedData (`v + "_data"`). Same wire shape as the
+// containers' "pointer" calling convention (Pair<VarInt, Sum<Unit,
+// Pointee>>, see FuncGen.cpp's generic std::is_pointer_v<T> branch in
+// DefineBasicTypeHandlers) - but neither Pointer nor Reference is a
+// Container, so there's no ContainerInfo/toml text to drive this from;
+// hand-written here instead, using v-prefixed names throughout (not the
+// bare names a container's own toml text needs) since this isn't wrapped
+// in its own lambda scope the way a container's kind-specific branch is.
+//
+// No aliasing/cycle support yet (see ContainerInfo.h's
+// reconstructUsesAliasRegistry doc for the equivalent, already-built
+// container-side mechanism) - a repeated non-null address is always an
+// error, exactly like std::unique_ptr's own non-registry guard.
+//
+// Ownership: unlike std::unique_ptr/std::shared_ptr, a raw pointer's type
+// carries no destruction machinery at all - there is no hook to ever run
+// a matching delete once this object is handed back to the caller, and no
+// way to know whether the original program even considered this pointer
+// "owning" in the first place. Heap-allocates and *deliberately* never
+// frees: a documented leak, not an oversight - see
+// docs/object-capture-initial-thoughts.md.
+std::string CodeGen::emitReconstructPointerValue(Type& pointeeType,
+                                                 const std::string& v,
+                                                 size_t& idCounter,
+                                                 std::string& code) {
+  code += "  auto " + v + "_ptr_pair = std::get<oi::exporters::ParsedData::"
+          "Pair>(" + v + "_data.val);\n";
+  code += "  auto " + v + "_addr_data = " + v + "_ptr_pair.first();\n";
+  code += "  auto " + v + "_addr = std::get<oi::exporters::ParsedData::"
+          "VarInt>(" + v + "_addr_data.val).value;\n";
+  code += "  auto " + v + "_sum = std::get<oi::exporters::ParsedData::"
+          "Sum>(" + v + "_ptr_pair.second().val);\n";
+  code += "  bool " + v + "_present = " + v + "_sum.index == 1;\n";
+
+  const std::string pointeeTypeName = resolveTypeName(pointeeType);
+  code += "  if (!" + v + "_present && " + v + "_addr != 0) {\n";
+  code += "    throw std::runtime_error(\"oi::reconstruct: " +
+          pointeeTypeName +
+          "* - a cycle detected (a captured pointer address was reused) "
+          "- not yet supported\");\n";
+  code += "  }\n";
+
+  const std::string resultVar = v + "_result";
+  code += "  " + pointeeTypeName + "* " + resultVar + " = nullptr;\n";
+  code += "  if (" + v + "_present) {\n";
+
+  std::string pointeeCode;
+  std::string pointeeExpr = emitReconstructValue(
+      pointeeType, v + "_sum.value()", idCounter, pointeeCode);
+  code += pointeeCode;
+  code += "    " + resultVar + " = new " + pointeeTypeName + "(" +
+          pointeeExpr + ");\n";
+  code += "  }\n";
+  return resultVar;
+}
+
 // The container slice of the reconstruction scaffold: a "list"-kind
 // container (sequence or set) or a "bytes"-kind one (e.g. a string) - not
 // yet a map, which needs a third, key+value calling convention - see
@@ -1859,12 +1934,29 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     return emitReconstructClassValue(*cls, v + "_data", idCounter, code);
   }
 
+  // A raw pointer arrives as one of two type-graph node kinds, both with
+  // an identical pointeeType()-bearing interface: a plain Pointer node
+  // (a narrow case - see resolveTypeName's comment, effectively only a
+  // C++ reference to an incomplete type), or - the common case for an
+  // ordinary chased T* member - a Reference node. ClangTypeParser's own
+  // enumeratePointer() produces the latter for any T* whenever
+  // chasePointer() is true (always for a root type; for a member, only
+  // when the chase-raw-pointers feature is on - otherwise the member
+  // becomes a plain scalar Primitive::Kind::StubbedPointer instead,
+  // which reconstructs today via the ordinary reconstructScalar<T> path
+  // above and is NOT this branch - see
+  // docs/object-capture-initial-thoughts.md for why that matters).
+  if (auto* ptr = dynamic_cast<Pointer*>(resolved))
+    return emitReconstructPointerValue(ptr->pointeeType(), v, idCounter, code);
+  if (auto* ref = dynamic_cast<Reference*>(resolved))
+    return emitReconstructPointerValue(ref->pointeeType(), v, idCounter, code);
+
   auto* cont = dynamic_cast<Container*>(resolved);
   if (!cont) {
     throw std::runtime_error(
         "CodeGen::emitReconstructValue: " + resolved->name() +
-        " is neither a scalar, an enum, a class, nor a reconstructable "
-        "container - not yet supported");
+        " is neither a scalar, an enum, a class, a reconstructable "
+        "container, nor a pointer - not yet supported");
   }
 
   const ContainerInfo& info = cont->containerInfo_;
