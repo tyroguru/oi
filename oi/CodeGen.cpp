@@ -28,6 +28,7 @@
 #include "oi/Headers.h"
 #include "type_graph/AddPadding.h"
 #include "type_graph/AlignmentCalc.h"
+#include "type_graph/DetectCycles.h"
 #include "type_graph/EnforceCompatibility.h"
 #include "type_graph/Flattener.h"
 #include "type_graph/IdentifyContainers.h"
@@ -50,6 +51,7 @@ using type_graph::AlignmentCalc;
 using type_graph::CaptureKeys;
 using type_graph::Class;
 using type_graph::Container;
+using type_graph::DetectCycles;
 using type_graph::EnforceCompatibility;
 using type_graph::Enum;
 using type_graph::Flattener;
@@ -1234,6 +1236,21 @@ void CodeGen::transform(TypeGraph& typeGraph) {
     assert(addPolymorphicInheritanceChildrenPtr_);
     (this->*addPolymorphicInheritanceChildrenPtr_)(pm, typeGraph);
   }
+
+  // Research groundwork for byte-accurate object capture/reconstruction
+  // (see docs/object-capture-initial-thoughts.md, not part of this repo) -
+  // Stage 1 of the fix for
+  // facebookexperimental/object-introspection#293 ("Cycles are problematic
+  // in TreeBuilder V2"): TreeBuilder V2's static type system cannot
+  // represent a cyclic type graph at all, and previously failed with
+  // either an enormous template-instantiation error or an outright
+  // compiler segfault. This pass detects that case and aborts with a
+  // clear, object-centric error instead - it doesn't yet attempt to fix
+  // the cycle (see #293's own comment thread for that follow-up). Legacy
+  // (non-TreeBuilderV2) codegen doesn't hit this problem, so it's skipped
+  // there.
+  if (config_.features[Feature::TreeBuilderV2])
+    pm.addPass(DetectCycles::createPass());
 
   pm.addPass(RemoveMembers::createPass(config_.membersToStub));
   if (!config_.features[Feature::TreeBuilderV2])
