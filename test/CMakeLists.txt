@@ -187,3 +187,31 @@ set_tests_properties(oil_install_smoke_run_shared PROPERTIES
 
 add_subdirectory(oil)
 add_subdirectory(oilgen)
+
+# Cyclic reconstruction demos (examples/reconstruct-demo) - real,
+# oilgen-driven capture+reconstruct round trips for true cyclic
+# reconstruction (facebookexperimental/object-introspection#293 stages
+# 4-5, see docs/object-capture-initial-thoughts.md, not part of this
+# repo). Registered as plain ctest cases rather than GTest ones: each
+# demo binary already returns EXIT_SUCCESS/EXIT_FAILURE based on its own
+# internal value/aliasing/use_count/exception checks (see each .cpp's own
+# main()), so ctest just needs to run it and check the exit code - a unit
+# test can't exercise this without reimplementing the same real oilgen
+# invocation these targets already perform at build time. Their
+# executable targets are defined in examples/reconstruct-demo, added
+# *before* this directory in the top-level CMakeLists.txt specifically so
+# they already exist here.
+foreach(cyclic_reconstruction_demo
+  cyclic_reconstruct_demo
+  container_cyclic_reconstruct_demo
+  unique_ptr_cyclic_root_demo
+  shared_ptr_cyclic_root_demo
+)
+  add_test(
+    NAME ${cyclic_reconstruction_demo}
+    COMMAND ${cyclic_reconstruction_demo}
+  )
+  set_tests_properties(${cyclic_reconstruction_demo} PROPERTIES
+    LABELS "cyclic_reconstruction"
+  )
+endforeach()
