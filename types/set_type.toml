@@ -78,6 +78,24 @@ for (auto&& it : container) {
 return tail.finish();
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "list" calling convention. Same shape as seq_type.toml's std::vector
+# (length + nextElement()), except insert() rather than push_back()/
+# reserve() - std::set has neither, and insert() gives the correct
+# "duplicates silently discarded" behavior for free, matching how the
+# original object could only ever have had one of each key in the first
+# place.
+reconstruct_kind = "list"
+reconstruct = """
+%1%<T0> result;
+for (size_t i = 0; i < length; i++) {
+  result.insert(nextElement());
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
 func = """

@@ -50,6 +50,23 @@ for (const auto &entry: container) {
 return tail.finish();
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "map" calling convention, already proven on std::map/std::unordered_map -
+# identical reconstruct text works unchanged here: a multimap legitimately
+# keeps duplicate keys, and emplace() already preserves duplicates correctly
+# (unlike std::map/unordered_map, nothing is meant to collapse here).
+reconstruct_kind = "map"
+reconstruct = """
+%1%<T0, T1> result;
+for (size_t i = 0; i < length; i++) {
+  auto entry = nextEntry();
+  result.emplace(std::move(entry.first), std::move(entry.second));
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::VarInt<DB>"
 func = "el.pointer = std::get<ParsedData::VarInt>(d.val).value;"

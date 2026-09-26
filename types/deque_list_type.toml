@@ -135,6 +135,22 @@ for (auto&& it: container) {
 return tail.finish();
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "list" calling convention, already proven on std::vector
+# (seq_type.toml) - same shape (length + nextElement()), minus
+# reserve(): std::deque has no reserve() to call (it isn't one
+# contiguous allocation), so this just push_back()s length times.
+reconstruct_kind = "list"
+reconstruct = """
+%1%<T0> result;
+for (size_t i = 0; i < length; i++) {
+  result.push_back(nextElement());
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
 func = """
