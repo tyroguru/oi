@@ -158,6 +158,9 @@ class CodeGen {
                                           const std::string& v,
                                           size_t& idCounter,
                                           std::string& code);
+  bool emitReconstructContainerCyclicPointerValue(type_graph::Container& cont,
+                                                  const std::string& v,
+                                                  std::string& code);
   void emitReconstructTypeHandlerSupport(type_graph::TypeGraph& typeGraph,
                                          std::string& code);
   void emitAliasRegistries(type_graph::TypeGraph& typeGraph, std::string& code);

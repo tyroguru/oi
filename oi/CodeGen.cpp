@@ -1791,22 +1791,39 @@ void CodeGen::emitReconstructTypeHandlerSupport(TypeGraph& typeGraph,
 // generates (however deeply nested) can already see it by ordinary
 // reference-capture, with no explicit threading needed.
 //
-// Two independent sources of alias-eligible types, each with their own key
-// prefix (so a std::shared_ptr<Widget> registry and a raw Widget* registry
-// - genuinely different allocations, even for the same pointee type - can
-// never collide):
+// Two independent key namespaces (so a std::shared_ptr<Widget> registry and
+// a raw Widget* registry - genuinely different allocations, even for the
+// same pointee type - can never collide), populated from three sources:
 //   - A Container whose ContainerInfo opts into aliasing support
 //     (currently just std::shared_ptr - see ContainerInfo.h's
 //     reconstructUsesAliasRegistry doc), keyed by
-//     "<container-type-name>|<pointee-type-name>", storing the container
-//     type itself (e.g. shared_ptr<Widget>) - aliasing means sharing a
-//     copy of that owning handle.
+//     "<container-type-name>|<real-pointee-type-name>", storing the
+//     container type itself (e.g. shared_ptr<Widget>) - aliasing means
+//     sharing a copy of that owning handle. Always eligible, cyclic or
+//     not.
+//   - A Container whose pointee is cycle-capable (see below) but whose
+//     ContainerInfo does *not* opt into aliasing (std::unique_ptr, which
+//     can't alias in the ordinary multi-owner sense - see
+//     emitReconstructContainerCyclicPointerValue) - keyed the same as the
+//     Pointer/Reference case just below, into the exact same registry:
+//     "raw-pointer|<real-pointee-type-name>", storing a plain pointee*.
+//     Only created for a cycle-capable pointee - an ordinary,
+//     non-self-referential std::unique_ptr still has no registry at all,
+//     unchanged.
 //   - Any Pointer or Reference node (a raw pointer or chased reference -
 //     see the "reference vs pointer" doc above) - *always* alias-eligible,
 //     no opt-in needed, since an ordinary raw pointer can always alias by
-//     construction (unlike std::unique_ptr) - keyed by
-//     "raw-pointer|<pointee-type-name>", storing a plain pointee* -
-//     aliasing means handing out the same already-allocated address.
+//     construction - keyed by "raw-pointer|<real-pointee-type-name>",
+//     storing a plain pointee* - aliasing means handing out the same
+//     already-allocated address.
+//
+// "Real" pointee type name, throughout: resolved past any CycleBreaker
+// wrapper (see resolvePointeeForReconstruct) rather than the raw
+// templateParams[0]/pointeeType() name directly - a wrapped edge's own
+// declared type names itself "OICycleBreaker<Real>" (see resolveTypeName's
+// CycleBreaker case), and using that spelling as a registry key would split
+// a wrapped edge and an ordinary edge to the exact same real class into two
+// separate, never-cross-referencing registries.
 //
 // Keyed by name rather than by node identity in both cases: the same
 // pointee type can be reached via more than one distinct Container/
@@ -1833,27 +1850,91 @@ void CodeGen::emitAliasRegistries(TypeGraph& typeGraph, std::string& code) {
   cycleReconstructHelperNames_.clear();
   cycleReconstructHelpersCode_.clear();
   cycleReconstructHelperCounter_ = 0;
-  std::vector<std::string> fieldTypeNames;
+
+  // Populated first, in its own pass: a Container/Pointer/Reference's own
+  // registry-eligibility (below) needs to already know whether its pointee
+  // is cycle-capable, but a CycleBreaker node can appear later in
+  // typeGraph.finalTypes than an ordinary edge reaching the very same
+  // class - learning that partway through a single combined pass would
+  // make the answer depend on iteration order.
   for (Type& t : typeGraph.finalTypes) {
     if (auto* cb = dynamic_cast<CycleBreaker*>(&t)) {
       if (auto* cls = dynamic_cast<Class*>(&cb->underlyingType())) {
         cycleCapableClasses_.insert(cls);
       }
+    }
+  }
+
+  std::vector<std::string> fieldTypeNames;
+  auto addRegistry = [&](std::string key, std::string valueTypeName) {
+    if (aliasRegistryIndices_.contains(key)) {
+      return;
+    }
+    size_t index = aliasRegistryIndices_.size();
+    aliasRegistryIndices_.emplace(std::move(key), index);
+    fieldTypeNames.push_back(std::move(valueTypeName));
+  };
+
+  for (Type& t : typeGraph.finalTypes) {
+    if (dynamic_cast<CycleBreaker*>(&t)) {
       continue;  // Never itself alias-eligible - see
                  // resolvePointeeForReconstruct.
     }
 
-    std::string key;
-    std::string valueTypeName;
-
     if (auto* cont = dynamic_cast<Container*>(&t)) {
-      if (!cont->containerInfo_.codegen.reconstructUsesAliasRegistry ||
-          cont->templateParams.empty()) {
+      if (cont->templateParams.empty()) {
         continue;
       }
-      key = cont->containerInfo_.typeName + "|" +
-            resolveTypeName(cont->templateParams[0].type());
-      valueTypeName = resolveTypeName(*cont);
+      // Resolved through any CycleBreaker wrapper (see
+      // resolvePointeeForReconstruct) rather than named directly - a
+      // wrapped edge's own templateParams[0] names itself as
+      // "OICycleBreaker<Real>" (see resolveTypeName's own CycleBreaker
+      // case), which would otherwise key/store this container's registry
+      // separately from an *ordinary*, unwrapped edge to the exact same
+      // real class elsewhere in the graph - the same class of bug
+      // cycleCapableClasses_'s own doc warns about, just one level deeper
+      // (a registry split in two instead of a missed early-registration).
+      Type& realPointee =
+          resolvePointeeForReconstruct(cont->templateParams[0].type());
+      auto* realClass = dynamic_cast<Class*>(&realPointee);
+      const bool cycleCapable =
+          realClass && cycleCapableClasses_.contains(realClass);
+      if (cont->containerInfo_.codegen.reconstructUsesAliasRegistry) {
+        // std::shared_ptr - already alias-eligible regardless of cycles,
+        // keyed/stored by its own owning container type (a real
+        // std::shared_ptr<Real>, sharing one control block - see
+        // emitReconstructContainerCyclicPointerValue's own doc for why this
+        // can't just store a bare Real*).
+        addRegistry(
+            cont->containerInfo_.typeName + "|" + resolveTypeName(realPointee),
+            cont->containerInfo_.typeName + "<" + resolveTypeName(realPointee) +
+                ">");
+        if (cycleCapable) {
+          // Also register the universal "raw-pointer|<Real>" entry every
+          // cycle-capable class needs regardless of which edge kind first
+          // allocates it (see emitReconstructPointerValue and
+          // emitReconstructContainerCyclicPointerValue's std::unique_ptr
+          // branch) - a shared_ptr edge's own allocation writes into *both*
+          // registries, so a raw pointer/reference/unique_ptr edge
+          // elsewhere in the graph that reaches this same address first
+          // (or second) can still find it, and so this shared_ptr's own
+          // registry-miss fallback (see
+          // emitReconstructContainerCyclicPointerValue) has somewhere to
+          // look when *its* registry alone doesn't have it yet.
+          addRegistry("raw-pointer|" + resolveTypeName(realPointee),
+                      resolveTypeName(realPointee) + "*");
+        }
+      } else if (cycleCapable) {
+        // std::unique_ptr (or any other non-aliasing "pointer"-kind
+        // container) whose pointee is cycle-capable - can't alias in the
+        // ordinary multi-owner sense, but still needs the exact same
+        // address->raw-pointer registry raw pointers/references already
+        // share (see emitReconstructContainerCyclicPointerValue), so a
+        // genuine ancestor reached back through this container's own edge
+        // resolves correctly instead of always erroring.
+        addRegistry("raw-pointer|" + resolveTypeName(realPointee),
+                    resolveTypeName(realPointee) + "*");
+      }
     } else if (auto* ptr = dynamic_cast<Pointer*>(&t)) {
       // A CycleBreaker-wrapped pointee (see BreakCycles) names itself as
       // "OICycleBreaker<Real>" - not a type reconstruction can ever build
@@ -1865,23 +1946,13 @@ void CodeGen::emitAliasRegistries(TypeGraph& typeGraph, std::string& code) {
       // type, reached via an edge that might close a cycle" (see
       // emitReconstructPointerValue).
       Type& realPointee = resolvePointeeForReconstruct(ptr->pointeeType());
-      key = "raw-pointer|" + resolveTypeName(realPointee);
-      valueTypeName = resolveTypeName(realPointee) + "*";
+      addRegistry("raw-pointer|" + resolveTypeName(realPointee),
+                  resolveTypeName(realPointee) + "*");
     } else if (auto* ref = dynamic_cast<Reference*>(&t)) {
       Type& realPointee = resolvePointeeForReconstruct(ref->pointeeType());
-      key = "raw-pointer|" + resolveTypeName(realPointee);
-      valueTypeName = resolveTypeName(realPointee) + "*";
-    } else {
-      continue;
+      addRegistry("raw-pointer|" + resolveTypeName(realPointee),
+                  resolveTypeName(realPointee) + "*");
     }
-
-    if (aliasRegistryIndices_.contains(key)) {
-      continue;
-    }
-
-    size_t index = aliasRegistryIndices_.size();
-    aliasRegistryIndices_.emplace(std::move(key), index);
-    fieldTypeNames.push_back(std::move(valueTypeName));
   }
 
   // A single struct bundling every registry, rather than one bare local
@@ -2148,16 +2219,36 @@ void CodeGen::emitReconstructClassValueInto(Class& cls,
                                             const std::string& parsedDataExpr,
                                             size_t& idCounter,
                                             std::string& code) {
+  // Default-construct *storagePtrExpr first, before decoding any field -
+  // not aggregate-initialize it from every field's expression in one shot
+  // the way emitReconstructClassValue (the non-placement, ordinary case)
+  // does. This storage was already registered into a registry by the
+  // caller (see emitReconstructPointerValue/
+  // emitReconstructContainerCyclicPointerValue) *before* this function
+  // ever runs - if some field's own decode throws partway through (e.g. a
+  // nested cycle closing onto the literal reconstruction root, see
+  // emitReconstructPointerValue's rootCycleMessage), something may already
+  // hold an owning handle to this address (a std::shared_ptr, specifically
+  // - see emitReconstructContainerCyclicPointerValue) that will try to
+  // destroy it during stack unwinding. An aggregate-init expression that
+  // never finishes evaluating means the object's lifetime never began at
+  // all - destroying it then is undefined behavior, empirically a SEGV
+  // inside std::shared_ptr's own control block trying to dispose of
+  // uninitialized memory. Value-initializing first guarantees a valid,
+  // destructible object exists throughout - every field decoded below has
+  // therefore *already fully succeeded* by the time its assignment runs,
+  // so the assignments themselves can't newly trigger this failure mode.
+  code += "  new (" + storagePtrExpr + ") " + resolveTypeName(cls) + "();\n";
+
   std::vector<std::string> names;
   std::vector<std::string> fieldExprs;
   collectReconstructFieldExprs(
       cls, parsedDataExpr, idCounter, code, names, fieldExprs);
 
-  code += "  new (" + storagePtrExpr + ") " + resolveTypeName(cls) + "{\n";
   for (size_t i = 0; i < names.size(); i++) {
-    code += "    ." + names[i] + " = std::move(" + fieldExprs[i] + "),\n";
+    code += "  (" + storagePtrExpr + ")->" + names[i] + " = std::move(" +
+            fieldExprs[i] + ");\n";
   }
-  code += "  };\n";
 }
 
 // Returns the name of a generated, reusable function that placement-
@@ -2451,6 +2542,220 @@ std::string CodeGen::emitReconstructPointerValue(Type& pointeeType,
   return resultVar;
 }
 
+// Container counterpart to emitReconstructPointerValue's isWrappedEdge/
+// cycle-capable branches - std::unique_ptr/std::shared_ptr's "pointer"
+// reconstruct_kind (see emitReconstructValue below) needed the exact same
+// register-before-recursing discipline once BreakCycles could wrap a
+// Container's own Param (see BreakCycles::visit(Container&)), but couldn't
+// reuse emitReconstructPointerValue outright: containers decode
+// `present`/the captured address through their own toml-declared processor
+// chain (already done by the caller, above), not the bare
+// Pair<VarInt, Sum<...>> shape emitReconstructPointerValue parses from
+// `v + "_data"` itself.
+//
+// Returns false (having emitted nothing) when neither this edge nor the
+// pointee's type is cycle-capable - the caller falls through to the
+// existing registerAlias/lookupAlias-or-throw-unconditionally +
+// pointeeVal() + toml `reconstruct` text path, entirely unchanged for
+// every non-cyclic container reconstructed today. Returns true (having
+// already emitted a `return ...;` for this container's own value) when it
+// handled the cycle-aware case - the caller must skip the toml text
+// entirely in that case, exactly as emitReconstructPointerValue's own
+// three branches never consult any toml text either.
+//
+// The one real split from emitReconstructPointerValue: std::shared_ptr's
+// existing registry (opted into via reconstructUsesAliasRegistry) stores
+// the *owning* container value itself (a real std::shared_ptr<Real>, with
+// its one true control block - registering a second, independently-
+// constructed std::shared_ptr<Real>(rawPtr) for the same address would be
+// an instant double-free), not a bare Real* the way the raw-pointer/
+// std::unique_ptr registries do - see docs/object-capture-initial-thoughts.md's
+// cyclic-reconstruction notes for the isolated prototype this was verified
+// against before being wired in here (no double-free, no leak, correct
+// use_count(), and - a nice side effect of storing a real owning value
+// rather than a bare pointer - the root-closing throw path leaks nothing
+// here either, unlike the raw-pointer/std::unique_ptr case, since ordinary
+// stack unwinding of __oi_reg's own std::shared_ptr copies cleans up via
+// RAII).
+bool CodeGen::emitReconstructContainerCyclicPointerValue(Container& cont,
+                                                         const std::string& v,
+                                                         std::string& code) {
+  Type& paramType = cont.templateParams[0].type();
+  bool isWrappedEdge = dynamic_cast<CycleBreaker*>(&paramType) != nullptr;
+  Type& realPointeeType = resolvePointeeForReconstruct(paramType);
+  auto* realClass = dynamic_cast<Class*>(&realPointeeType);
+  bool cycleCapable = realClass && cycleCapableClasses_.contains(realClass);
+
+  if (!isWrappedEdge && !cycleCapable)
+    return false;
+
+  const ContainerInfo& info = cont.containerInfo_;
+  const std::string pointeeTypeName = resolveTypeName(realPointeeType);
+  const std::string fieldTypeName = resolveTypeName(cont);
+  // std::shared_ptr's existing registry (reconstructUsesAliasRegistry)
+  // stores the *owning* value itself (a real std::shared_ptr<Real>, with
+  // its one true control block) - registering a second, independently-
+  // constructed std::shared_ptr<Real>(rawPtr) for the same address would
+  // be an instant double-free (two control blocks racing to delete the
+  // same object). std::unique_ptr (and anything else "pointer"-kind but
+  // not alias-registry-eligible) has no such registry today; this reuses
+  // the exact "raw-pointer|<T>" registry raw pointers/references already
+  // share, storing a bare Real* - safe because only one owning edge can
+  // ever legitimately wrap it in a real std::unique_ptr (see the isolated
+  // prototype this was verified against, referenced in this function's own
+  // header comment).
+  const bool storesSmartPointer = info.codegen.reconstructUsesAliasRegistry;
+
+  const std::string registryKey = storesSmartPointer
+                                      ? info.typeName + "|" + pointeeTypeName
+                                      : "raw-pointer|" + pointeeTypeName;
+  auto it = aliasRegistryIndices_.find(registryKey);
+  if (it == aliasRegistryIndices_.end()) {
+    // Should be unreachable: emitAliasRegistries walks the exact same
+    // typeGraph.finalTypes this container was itself found in, using the
+    // same key, before any member is reconstructed.
+    throw std::runtime_error(
+        "CodeGen::emitReconstructContainerCyclicPointerValue: " +
+        info.typeName +
+        " needs a cycle-aware registry but none was declared for pointee " +
+        pointeeTypeName);
+  }
+  const std::string registryVar =
+      "__oi_reg.field_" + std::to_string(it->second);
+
+  // std::shared_ptr only: the universal "raw-pointer|<Real>" registry every
+  // cycle-capable class also gets (see emitAliasRegistries) - a *different*
+  // edge kind (a raw pointer/reference, or std::unique_ptr) reaching this
+  // same address first would only ever register the bare pointer there,
+  // never a std::shared_ptr<Real> - without this fallback, this edge's own
+  // registry (registryVar, above) would miss even though the address is
+  // legitimately already allocated, and incorrectly report a root closure.
+  // Safe to wrap in a *new* shared_ptr the first time a shared_ptr edge
+  // claims it: a well-formed captured object never has a given address
+  // genuinely owned by both a std::unique_ptr and a std::shared_ptr at
+  // once, so a hit here can only ever be a non-owning raw observation
+  // becoming a real owner for the first time, not a second, competing
+  // owner.
+  std::string rawRegistryVar;
+  if (storesSmartPointer) {
+    auto rawIt = aliasRegistryIndices_.find("raw-pointer|" + pointeeTypeName);
+    if (rawIt == aliasRegistryIndices_.end()) {
+      throw std::runtime_error(
+          "CodeGen::emitReconstructContainerCyclicPointerValue: " +
+          info.typeName +
+          " needs the universal raw-pointer registry but none was declared "
+          "for pointee " +
+          pointeeTypeName);
+    }
+    rawRegistryVar = "__oi_reg.field_" + std::to_string(rawIt->second);
+  }
+
+  const std::string rootCycleMessage =
+      "oi::reconstruct: " + pointeeTypeName +
+      " at address \" + std::to_string(" + v +
+      "_addr) + \" closes a "
+      "reference cycle back onto the object being reconstructed (the "
+      "root itself). oi::reconstruct<T>() returns T by value, so this "
+      "can't be represented today - any move or copy on return would "
+      "leave this self-pointer dangling. Reconstructing this shape needs "
+      "a caller-owns-the-storage entry point (a planned "
+      "oi::reconstructInto<T>(T&, bytes) - not yet implemented). See "
+      "docs/object-capture-initial-thoughts.md's cyclic-reconstruction "
+      "notes, not part of this repo.";
+
+  // False only when this is a wrapped edge and capture-bytes is off - no
+  // field data ever exists behind a CycleBreaker's Unit-typed content in
+  // that configuration (see genCycleBreakerTypeHandler), so nothing here
+  // can ever allocate/decode fresh content, only look an already-
+  // registered address up - mirrors emitReconstructPointerValue's own
+  // identical fallback.
+  const bool canDecode =
+      !isWrappedEdge || config_.features[Feature::CaptureBytes];
+
+  const std::string ownerTypeName =
+      storesSmartPointer ? info.typeName + "<" + pointeeTypeName + ">"
+                         : pointeeTypeName + "*";
+  const std::string ownerVar = v + (storesSmartPointer ? "_owner" : "_raw");
+
+  code += "  " + ownerTypeName + " " + ownerVar +
+          (storesSmartPointer ? ";\n" : " = nullptr;\n");
+
+  if (canDecode) {
+    code += "  if (present) {\n";
+    code += "    auto* " + v + "_new = static_cast<" + pointeeTypeName +
+            "*>(::operator new(sizeof(" + pointeeTypeName + ")));\n";
+    code +=
+        "    " + ownerVar + " = " +
+        (storesSmartPointer ? ownerTypeName + "(" + v + "_new)" : v + "_new") +
+        ";\n";
+    code += "    " + registryVar + "[" + v + "_addr] = " + ownerVar + ";\n";
+    if (storesSmartPointer) {
+      // Also populate the universal raw-pointer registry (see its own
+      // declaration above) - so a raw pointer/reference/unique_ptr edge
+      // elsewhere in the graph that reaches this address can find it too.
+      code += "    " + rawRegistryVar + "[" + v + "_addr] = " + v + "_new;\n";
+    }
+    const std::string& helperName = getOrEmitCycleReconstructHelper(*realClass);
+    if (isWrappedEdge) {
+      code += "    auto " + v +
+              "_nested_bytes = std::get<oi::exporters::ParsedData::"
+              "DynBytes>(" +
+              v + "_sum.value().val).value;\n";
+      code +=
+          "    auto " + v + "_nested_it = " + v + "_nested_bytes.cbegin();\n";
+      code += "    auto " + v +
+              "_nested_data = oi::exporters::ParsedData::parse(" + v +
+              "_nested_it, TypeHandler<Ctx, " + pointeeTypeName +
+              ">::type::describe);\n";
+      code += "    " + helperName + "(" + v + "_new, " + v +
+              "_nested_data, __oi_reg);\n";
+    } else {
+      code += "    " + helperName + "(" + v + "_new, " + v +
+              "_sum.value(), __oi_reg);\n";
+    }
+    code += "  } else if (" + v + "_addr != 0) {\n";
+  } else {
+    code += "  if (" + v + "_addr != 0) {\n";
+  }
+  code += "    auto " + v + "_it = " + registryVar + ".find(" + v + "_addr);\n";
+  code += "    if (" + v + "_it != " + registryVar + ".end()) {\n";
+  code += "      " + ownerVar + " = " + v + "_it->second;\n";
+  if (storesSmartPointer) {
+    code += "    } else {\n";
+    code += "      auto " + v + "_raw_it = " + rawRegistryVar + ".find(" + v +
+            "_addr);\n";
+    code += "      if (" + v + "_raw_it == " + rawRegistryVar + ".end()) {\n";
+    code += "        throw std::runtime_error(\"" + rootCycleMessage + "\");\n";
+    code += "      }\n";
+    code += "      " + ownerVar + " = " + ownerTypeName + "(" + v +
+            "_raw_it->second);\n";
+    code += "      " + registryVar + "[" + v + "_addr] = " + ownerVar + ";\n";
+    code += "    }\n";
+  } else {
+    code += "    } else {\n";
+    code += "      throw std::runtime_error(\"" + rootCycleMessage + "\");\n";
+    code += "    }\n";
+  }
+  code += "  }\n";
+
+  if (storesSmartPointer) {
+    if (isWrappedEdge) {
+      code += "  return " + ownerVar + " ? std::static_pointer_cast<" +
+              resolveTypeName(paramType) + ">(" + ownerVar +
+              ") : " + fieldTypeName + "{};\n";
+    } else {
+      code += "  return " + ownerVar + ";\n";
+    }
+  } else if (isWrappedEdge) {
+    code += "  return " + fieldTypeName + "(static_cast<" +
+            resolveTypeName(paramType) + "*>(" + ownerVar + "));\n";
+  } else {
+    code += "  return " + fieldTypeName + "(" + ownerVar + ");\n";
+  }
+
+  return true;
+}
+
 // The container slice of the reconstruction scaffold: a "list"-kind
 // container (sequence or set) or a "bytes"-kind one (e.g. a string) - not
 // yet a map, which needs a third, key+value calling convention - see
@@ -2668,6 +2973,14 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     }
   }
 
+  // Set by the "pointer" branch below when
+  // emitReconstructContainerCyclicPointerValue already emitted this
+  // container's own `return ...;` - the generic "using T0/T1" + this
+  // container's own toml `reconstruct` text further down must be skipped
+  // entirely in that case, exactly as emitReconstructPointerValue's own
+  // cycle-aware branches never consult any toml text either.
+  bool skipGenericReconstructText = false;
+
   if (info.codegen.reconstructKind == "list") {
     code += "  auto " + v +
             "_list = std::get<oi::exporters::ParsedData::"
@@ -2711,7 +3024,13 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
             lastVal + ".val);\n";
     code += "  bool present = " + v + "_sum.index == 1;\n";
 
-    if (info.codegen.reconstructUsesAliasRegistry) {
+    if (emitReconstructContainerCyclicPointerValue(*cont, v, code)) {
+      // Already emitted this container's own `return ...;` above - skip
+      // the ordinary registerAlias/lookupAlias/pointeeVal() + toml
+      // `reconstruct` text entirely, same as emitReconstructPointerValue's
+      // own cycle-aware branches.
+      skipGenericReconstructText = true;
+    } else if (info.codegen.reconstructUsesAliasRegistry) {
       // A repeated non-null address might be resolvable (aliasing - the
       // address was already fully reconstructed elsewhere, so hand back
       // a copy sharing ownership) or might not be (a cycle - the address
@@ -2752,9 +3071,13 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
       code += "    return __oi_it->second;\n";
       code += "  };\n";
     } else {
-      // No registry for this container kind (std::unique_ptr - can't
-      // alias by construction), so a repeated non-null address can only
-      // mean a cycle - always an error.
+      // Reached only for a genuinely non-cycle-capable std::unique_ptr
+      // now - emitReconstructContainerCyclicPointerValue above already
+      // handled (and returned true for) any cycle-capable pointee, giving
+      // it the same address->raw-pointer registry raw pointers/references
+      // use. This container kind still has no registry of its own for the
+      // ordinary case, so a repeated non-null address here can only mean
+      // something has gone wrong - always an error.
       code += "  if (!present && " + v + "_addr != 0) {\n";
       code +=
           "    throw std::runtime_error(\"oi::reconstruct: " + info.typeName +
@@ -2763,22 +3086,27 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
       code += "  }\n";
     }
 
-    // Recurse for the pointee type - its own decode statements land
-    // inside pointeeVal()'s lambda body, its own fresh C++ scope. Sum's
-    // alternative-0 shape is types::st::Unit (zero wire bytes by
-    // construction), so it's safe for the reconstruct text below to never
-    // call pointeeVal() at all when `present` is false - there is nothing
-    // to drain.
-    std::string pointeeCode;
-    std::string pointeeExpr =
-        emitReconstructValue(cont->templateParams[0].type(),
-                             v + "_sum.value()",
-                             idCounter,
-                             pointeeCode);
-    code += "  auto pointeeVal = [&]() {\n";
-    code += pointeeCode;
-    code += "    return " + pointeeExpr + ";\n";
-    code += "  };\n";
+    if (!skipGenericReconstructText) {
+      // Recurse for the pointee type - its own decode statements land
+      // inside pointeeVal()'s lambda body, its own fresh C++ scope. Sum's
+      // alternative-0 shape is types::st::Unit (zero wire bytes by
+      // construction), so it's safe for the reconstruct text below to
+      // never call pointeeVal() at all when `present` is false - there is
+      // nothing to drain. Skipped entirely in the cycle-aware case above -
+      // cont->templateParams[0].type() may itself be a bare CycleBreaker
+      // there, which this generic recursion doesn't (and shouldn't need
+      // to) know how to handle.
+      std::string pointeeCode;
+      std::string pointeeExpr =
+          emitReconstructValue(cont->templateParams[0].type(),
+                               v + "_sum.value()",
+                               idCounter,
+                               pointeeCode);
+      code += "  auto pointeeVal = [&]() {\n";
+      code += pointeeCode;
+      code += "    return " + pointeeExpr + ";\n";
+      code += "  };\n";
+    }
   } else if (info.codegen.reconstructKind == "map") {
     // A map's content processor is a List of (key, value) Pairs (see
     // std_map_type.toml) - one level of structure beyond "list"-kind's
@@ -2819,22 +3147,26 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
         lastVal + ".val).value;\n";
   }
 
-  // T0 (and T1, for a "map"-kind container) must mean *this* container's
-  // own template parameters inside its own reconstruct body - shadowing
-  // whatever an enclosing level (if any) already declared. Without this,
-  // a nested container's reconstruct body (e.g. a vector<string>'s
-  // element string) would incorrectly see the outermost container's T0
-  // instead of its own, since bare `T0`/`T1` are otherwise just
-  // unqualified names looked up in the enclosing scope.
-  code += "    using T0 = " + resolveTypeName(cont->templateParams[0].type()) +
-          ";\n";
-  if (cont->templateParams.size() >= 2) {
+  if (!skipGenericReconstructText) {
+    // T0 (and T1, for a "map"-kind container) must mean *this* container's
+    // own template parameters inside its own reconstruct body - shadowing
+    // whatever an enclosing level (if any) already declared. Without this,
+    // a nested container's reconstruct body (e.g. a vector<string>'s
+    // element string) would incorrectly see the outermost container's T0
+    // instead of its own, since bare `T0`/`T1` are otherwise just
+    // unqualified names looked up in the enclosing scope.
     code +=
-        "    using T1 = " + resolveTypeName(cont->templateParams[1].type()) +
+        "    using T0 = " + resolveTypeName(cont->templateParams[0].type()) +
         ";\n";
+    if (cont->templateParams.size() >= 2) {
+      code +=
+          "    using T1 = " + resolveTypeName(cont->templateParams[1].type()) +
+          ";\n";
+    }
+    code += (boost::format(info.codegen.reconstruct) % info.typeName).str();
+    code += "\n";
   }
-  code += (boost::format(info.codegen.reconstruct) % info.typeName).str();
-  code += "\n  }();\n";
+  code += "  }();\n";
 
   return resultVar;
 }

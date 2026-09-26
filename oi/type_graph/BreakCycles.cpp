@@ -91,6 +91,33 @@ Type& BreakCycles::visit(Reference& r) {
   return r;
 }
 
+Type& BreakCycles::visit(Container& c) {
+  // Same shape as visit(Pointer&)/visit(Reference&) above, applied to each
+  // template param instead of a single pointee - e.g. std::shared_ptr<T>/
+  // std::unique_ptr<T>'s one Param. A Container can have more than one
+  // param (e.g. std::map's key/value), so each is checked independently;
+  // in practice only a single-param, pointer-shaped container can ever
+  // legitimately close a cycle this way (T is the Class itself), but there's
+  // nothing container-kind-specific in the check.
+  for (auto& param : c.templateParams) {
+    Type& paramType = param.type();
+    NodeId id = paramType.id();
+    if (id >= 0 && onPath_.contains(id)) {
+      param.setType(wrapInCycleBreaker(paramType));
+    } else {
+      param.setType(mutate(paramType));
+    }
+  }
+
+  // `underlying()` is a container-kind-internal detail (not a template
+  // param), not the shape this pass targets - falls through to the
+  // ordinary mutate() catch-all (leaves an on-path cycle untouched for
+  // DetectCycles to catch), unchanged from before this override existed.
+  c.setUnderlying(mutate(c.underlying()));
+
+  return c;
+}
+
 Type& BreakCycles::wrapInCycleBreaker(Type& pointee) {
   NodeId id = pointee.id();
   if (id >= 0) {
