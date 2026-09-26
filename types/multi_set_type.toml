@@ -50,6 +50,22 @@ for (auto&& it : container) {
 return tail.finish();
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "list" calling convention, already proven on std::set (set_type.toml) -
+# identical shape (length + nextElement() + insert()), except a multiset
+# legitimately keeps duplicate keys, which insert() already does correctly
+# (unlike std::set, nothing is meant to collapse here).
+reconstruct_kind = "list"
+reconstruct = """
+%1%<T0> result;
+for (size_t i = 0; i < length; i++) {
+  result.insert(nextElement());
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::VarInt<DB>"
 func = """

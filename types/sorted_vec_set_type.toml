@@ -45,6 +45,25 @@ for (const auto& el : container) {
 return tail.finish();
 '''
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "list" calling convention, already proven on std::set (set_type.toml) -
+# same shape (length + nextElement() + insert()): folly::sorted_vector_set
+# has the same "only one real (unstubbed, defaulted) template parameter"
+# shape as std::set (Compare/Allocator/GrowthPolicy/Container all take
+# their defaults here), and insert() maintains sorted-vector invariants and
+# de-duplicates for free, matching how the original object could only ever
+# have had one of each key in the first place.
+reconstruct_kind = "list"
+reconstruct = """
+%1%<T0> result;
+for (size_t i = 0; i < length; i++) {
+  result.insert(nextElement());
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::VarInt<DB>"
 func = "el.pointer = std::get<ParsedData::VarInt>(d.val).value;"
