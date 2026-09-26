@@ -91,11 +91,32 @@ bool containerAllowsIncompleteParam(const Container& c, size_t i) {
   switch (c.containerInfo_.ctype) {
     case SEQ_TYPE:
     case LIST_TYPE:
-    case UNIQ_PTR_TYPE:
-    case SHRD_PTR_TYPE:
       // Also std::forward_list, if we ever support that
       // Would be good to have this as an option in the TOML files
       return i == 0;
+    case UNIQ_PTR_TYPE:
+    case SHRD_PTR_TYPE:
+      // Param 0 (T) - see above. Param 1 (the deleter, e.g.
+      // std::default_delete<T>) is deferred too: it names T as *its own*
+      // template argument, so visiting it eagerly (the default for any
+      // param this function doesn't cover) recurses into T's declaration
+      // right here - normally harmless (T ends up declared a little
+      // earlier than otherwise), but actively wrong when T is a
+      // CycleBreaker (see BreakCycles/CodeGen::genCycleBreakerTypeHandler):
+      // that recursion reaches CycleBreaker::underlyingType() before the
+      // *class-level* member loop that discovered this container in the
+      // first place has had a chance to push the underlying type onto
+      // sortedTypes_ itself, pushing the CycleBreaker node first instead -
+      // exactly backwards from the declaration order
+      // genCycleBreakerTypeHandler's non-dependent name lookup requires
+      // (the underlying type's own TypeHandler specialization must already
+      // be visible). A stateless deleter like std::default_delete<T> never
+      // actually needs T declared any earlier than T's own pointee-of
+      // deferral already allows, so deferring it the same way is safe for
+      // the ordinary (non-cyclic) case too - confirmed via reconstruct_demo's
+      // own non-cyclic std::unique_ptr<ContactInfo> member, unaffected by
+      // this change.
+      return i <= 1;
     default:
       return false;
   }

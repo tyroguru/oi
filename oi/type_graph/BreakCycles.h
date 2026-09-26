@@ -38,23 +38,32 @@ class TypeGraph;
  * Runs before DetectCycles. Walks the type graph with the same ordinary
  * three-colour DFS (in-progress / done / unvisited, tracked via each node's
  * own stable NodeId) that DetectCycles uses to report cycles, but instead of
- * throwing when a Pointer/Reference edge points back to a live ancestor, it
- * rewrites that one edge's pointee to a `CycleBreaker` wrapper: an empty
- * subclass of the real pointee with identical size/layout but a distinct
- * C++ identity, so the member's declared pointer type in the generated code
- * (`OICycleBreaker<Node_0>* next;` rather than `Node_0* next;`) no longer
- * names the type that's still being defined further up the same DFS path.
- * `CodeGen::genCycleBreakerTypeHandler` gives `OICycleBreaker<T>` its own
- * trivial `TypeHandler` specialization that reinterprets back to the real
- * type at the point it's actually traversed, once that real type is fully
- * defined - see that function for the full mechanism.
+ * throwing when a Pointer/Reference edge - or, as of the joint
+ * shared_ptr/unique_ptr increment, a Container's template-param edge (e.g.
+ * a self-referential `std::shared_ptr<Node>`/`std::unique_ptr<Node>`
+ * member) - points back to a live ancestor, rewrites that one edge's
+ * pointee to a `CycleBreaker` wrapper: an empty subclass of the real
+ * pointee with identical size/layout but a distinct C++ identity, so the
+ * member's declared type in the generated code (`OICycleBreaker<Node_0>*
+ * next;`, or `std::shared_ptr<OICycleBreaker<Node_0>> next;`, rather than
+ * naming `Node_0` directly) no longer names the type that's still being
+ * defined further up the same DFS path. `CodeGen::genCycleBreakerTypeHandler`
+ * gives `OICycleBreaker<T>` its own trivial `TypeHandler` specialization
+ * that reinterprets back to the real type at the point it's actually
+ * traversed, once that real type is fully defined - see that function for
+ * the full mechanism. Deliberately container-agnostic: `CycleBreaker`
+ * itself, and `genCycleBreakerTypeHandler`, don't know or care whether the
+ * wrapped edge came from a Pointer/Reference or a Container's Param - only
+ * `visit(Container&)` below needed to change to extend this to
+ * `shared_ptr`/`unique_ptr`.
  *
- * Whatever cycle shape this pass can't safely break (anything not mediated
- * by a plain Class-member Pointer/Reference edge - e.g. a cycle running
- * through a container's template parameter, such as a self-referential
- * `std::shared_ptr<Node>` member) is deliberately left alone; DetectCycles
- * runs immediately afterwards and still catches it with its usual clear
- * diagnostic, exactly as before this pass existed.
+ * Whatever cycle shape this pass still can't safely break (anything not
+ * mediated by a plain Class-member Pointer/Reference edge or a Container's
+ * own template-param edge - e.g. a cycle running through a container's
+ * *non-owning* `underlying()` type, which `visit(Container&)` deliberately
+ * leaves to the ordinary `mutate()` catch-all below) is left alone;
+ * DetectCycles runs immediately afterwards and still catches it with its
+ * usual clear diagnostic, exactly as before this pass existed.
  */
 class BreakCycles final : public RecursiveMutator {
  public:
@@ -68,6 +77,7 @@ class BreakCycles final : public RecursiveMutator {
   Type& mutate(Type& type) override;
   Type& visit(Pointer& p) override;
   Type& visit(Reference& r) override;
+  Type& visit(Container& c) override;
 
  private:
   Type& wrapInCycleBreaker(Type& pointee);

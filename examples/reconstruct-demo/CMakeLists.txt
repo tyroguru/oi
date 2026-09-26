@@ -346,3 +346,92 @@ set_target_properties(cyclic_reconstruct_demo
   PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
 )
+
+#
+# container_cyclic_reconstruct_demo, unique_ptr_cyclic_root_demo,
+# shared_ptr_cyclic_root_demo: the std::unique_ptr/std::shared_ptr
+# counterparts to cyclic_reconstruct_demo above, once
+# BreakCycles::visit(Container&) and
+# CodeGen::emitReconstructContainerCyclicPointerValue extended true cyclic
+# reconstruction from raw pointers/references to container-mediated cycles
+# too. Three targets, not one: oilgen allows only one introspect/
+# reconstruct call site per translation unit, and the root-closing case
+# for each container kind needs its own root type (the literal
+# self-referential class, not a wrapper - see each .cpp's own header
+# comment), so it can't share a file with the (combined, both-kinds)
+# non-root success case either. All three reuse
+# RECONSTRUCT_DEMO_CONFIG_PATH/reconstruct_demo_config (capture-bytes +
+# chase-raw-pointers, generated above for reconstruct_demo) rather than
+# generating their own - identical feature requirements, no need for a
+# third copy of the same config.
+#
+
+function(add_cyclic_container_demo TARGET_NAME SOURCE_FILE)
+  add_library(${TARGET_NAME}_obj OBJECT "${SOURCE_FILE}")
+
+  target_include_directories(${TARGET_NAME}_obj
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}/include"
+  )
+
+  target_compile_definitions(${TARGET_NAME}_obj
+    PRIVATE
+      OIL_AOT_COMPILATION=1
+  )
+
+  target_compile_features(${TARGET_NAME}_obj
+    PRIVATE
+      cxx_std_20
+  )
+
+  target_compile_options(${TARGET_NAME}_obj
+    PRIVATE
+      $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-g>
+  )
+
+  set(GENERATED_O "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.introspection.o")
+
+  add_custom_command(
+    OUTPUT "${GENERATED_O}"
+    COMMAND
+      $<TARGET_FILE:oilgen>
+      -p "${CMAKE_BINARY_DIR}"
+      "--config-file=${RECONSTRUCT_DEMO_CONFIG_PATH}"
+      "--output=${GENERATED_O}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}"
+    DEPENDS
+      oilgen
+      ${TARGET_NAME}_obj
+      reconstruct_demo_config
+      "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}"
+    COMMENT
+      "oilgen: generating AOT introspect+reconstruct code for ${SOURCE_FILE}"
+    VERBATIM
+  )
+
+  add_custom_target(${TARGET_NAME}_generated DEPENDS "${GENERATED_O}")
+
+  add_executable(${TARGET_NAME}
+    $<TARGET_OBJECTS:${TARGET_NAME}_obj>
+    "${GENERATED_O}"
+  )
+
+  add_dependencies(${TARGET_NAME} ${TARGET_NAME}_generated)
+
+  target_link_libraries(${TARGET_NAME}
+    PRIVATE
+      oil_shared
+  )
+
+  set_target_properties(${TARGET_NAME}
+    PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin"
+  )
+endfunction()
+
+add_cyclic_container_demo(container_cyclic_reconstruct_demo
+  ContainerCyclicReconstructDemo.cpp)
+add_cyclic_container_demo(unique_ptr_cyclic_root_demo
+  UniquePtrCyclicRootDemo.cpp)
+add_cyclic_container_demo(shared_ptr_cyclic_root_demo
+  SharedPtrCyclicRootDemo.cpp)
