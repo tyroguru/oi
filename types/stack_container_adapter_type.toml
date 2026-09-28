@@ -31,3 +31,76 @@ void getSizeType(const %1%<T, Container> &containerAdapter, size_t& returnArg)
     getSizeType(container, returnArg);
 }
 """
+
+# TreeBuilder-v2 support (capture and, below, reconstruction - see
+# docs/object-capture-initial-thoughts.md, not part of this repo).
+# std::stack has no public iteration of its own (deliberately, per its own
+# API design) - get_container() (a pointer-to-protected-member trick
+# already declared for every generated file, see
+# FuncGen::DeclareGetContainer, and already used by this container's own
+# `func` above) reaches its protected `c` member. Rather than delegating
+# to that member's own (Container-type-dependent) wire encoding - which a
+# single, statically-fixed processor list below couldn't match for every
+# possible Container choice - this defines its own container-agnostic
+# "length + elements" shape, the same convention every other list-kind
+# container already uses. std::stack<T, Container> contributes no bytes of
+# its own beyond the one member get_container() reaches (no vtable, no
+# other state), so there's nothing else to account for here.
+traversal_func = """
+const auto& underlying = get_container(container);
+
+auto tail = returnArg
+  .write((uintptr_t)&container)
+  .write(underlying.size());
+
+for (auto&& it : underlying) {
+  tail = tail.delegate([&ctx, &it](auto ret) {
+    return OIInternal::getSizeType<Ctx>(ctx, it, ret);
+  });
+}
+
+return tail.finish();
+"""
+
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "list" calling convention. libstdc++ implements std::stack::push() as a
+# call to its underlying container's own push_back() - replaying captured
+# elements via push(), in the same front-to-back order they were captured
+# in, exactly reproduces both the contents and the pop order of the
+# original. Unlike Compare/Allocator, this container's Container parameter
+# (T1) is *not* left for its own default to supply (see
+# countRealTemplateParams's own comment on why: it directly determines the
+# adapter's size/layout, unlike a typically-empty Compare/Allocator) - named
+# explicitly here so this always constructs the same Container the field
+# was actually declared with.
+reconstruct_kind = "list"
+reconstruct = """
+%1%<T0, T1> result;
+for (size_t i = 0; i < length; i++) {
+  result.push(nextElement());
+}
+return result;
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+el.pointer = std::get<ParsedData::VarInt>(d.val).value;
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, typename TypeHandler<Ctx, T0>::type>"
+func = """
+static constexpr auto childField = make_field<Ctx, T0>("[]");
+
+auto list = std::get<ParsedData::List>(d.val);
+el.container_stats.emplace(result::Element::ContainerStats {
+  .capacity = list.length,
+  .length = list.length,
+});
+
+for (size_t i = 0; i < list.length; i++)
+  stack_ins(childField);
+"""

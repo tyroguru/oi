@@ -1622,15 +1622,30 @@ Type& resolvePointeeForReconstruct(Type& pointeeType) {
 // (see resolveTypeName's own comment on its Container case for why that's
 // usually safe). The base count is fixed by reconstruct_kind: exactly 2 for
 // a "map" (key and value), 1 for everything else (a single element/
-// pointee). That base is then extended through any run of non-type
-// ("value") template parameters immediately following it - e.g.
-// std::array's size N, right after its element type - since a value
-// parameter with no default (unlike Compare/Allocator/Hash/KeyEqual, which
-// always have one) can never be safely omitted, regardless of position.
+// pointee). That base is then extended:
+//  - through any run of non-type ("value") template parameters immediately
+//    following it - e.g. std::array's size N, right after its element type
+//    - since a value parameter with no default (unlike Compare/Allocator/
+//    Hash/KeyEqual, which always have one) can never be safely omitted,
+//    regardless of position;
+//  - up to and including `underlying_container_index`, when a container
+//    declares one (e.g. std::stack/std::queue/std::priority_queue's own
+//    Container parameter) - unlike Compare/Allocator, which are typically
+//    empty/stateless and therefore layout-transparent if omitted, the
+//    underlying storage container directly determines the adapter's own
+//    size and layout (std::stack<T, std::vector<T>> and
+//    std::stack<T, std::deque<T>> are entirely different sizes), so it can
+//    never be safely omitted either, even though it's a type parameter
+//    rather than a value one. (Every current use has this index adjacent
+//    to the base count, so extending "up to and including" it never skips
+//    over anything that was meant to stay unnamed in between - a future
+//    container that violates that assumption would need this revisited.)
 size_t countRealTemplateParams(const Container& cont) {
   size_t n = cont.containerInfo_.codegen.reconstructKind == "map" ? 2 : 1;
   while (n < cont.templateParams.size() && cont.templateParams[n].value)
     n++;
+  if (auto idx = cont.containerInfo_.underlyingContainerIndex; idx && *idx + 1 > n)
+    n = *idx + 1;
   return n;
 }
 

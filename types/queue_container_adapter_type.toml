@@ -32,3 +32,64 @@ void getSizeType(const %1%<T, Container> &containerAdapter, size_t& returnArg)
 }
 """
 
+# TreeBuilder-v2 support (capture and, below, reconstruction - see
+# docs/object-capture-initial-thoughts.md, not part of this repo). See
+# stack_container_adapter_type.toml's matching comment - std::queue is the
+# same shape (no public iteration of its own; get_container() reaches its
+# protected `c` member; this defines its own container-agnostic
+# "length + elements" wire shape rather than delegating to Container's own,
+# for the same reason).
+traversal_func = """
+const auto& underlying = get_container(container);
+
+auto tail = returnArg
+  .write((uintptr_t)&container)
+  .write(underlying.size());
+
+for (auto&& it : underlying) {
+  tail = tail.delegate([&ctx, &it](auto ret) {
+    return OIInternal::getSizeType<Ctx>(ctx, it, ret);
+  });
+}
+
+return tail.finish();
+"""
+
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "list" calling convention, and stack_container_adapter_type.toml's
+# matching comment - libstdc++ implements std::queue::push() as a call to
+# its underlying container's own push_back() too, so the same
+# replay-in-captured-order reasoning applies unchanged, including naming
+# Container (T1) explicitly rather than leaving it to its own default.
+reconstruct_kind = "list"
+reconstruct = """
+%1%<T0, T1> result;
+for (size_t i = 0; i < length; i++) {
+  result.push(nextElement());
+}
+return result;
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+el.pointer = std::get<ParsedData::VarInt>(d.val).value;
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, typename TypeHandler<Ctx, T0>::type>"
+func = """
+static constexpr auto childField = make_field<Ctx, T0>("[]");
+
+auto list = std::get<ParsedData::List>(d.val);
+el.container_stats.emplace(result::Element::ContainerStats {
+  .capacity = list.length,
+  .length = list.length,
+});
+
+for (size_t i = 0; i < list.length; i++)
+  stack_ins(childField);
+"""
+
