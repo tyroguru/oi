@@ -620,7 +620,8 @@ class Primitive : public Type {
     Void,
   };
 
-  explicit Primitive(Kind kind) : kind_(kind), name_(getName(kind)) {
+  explicit Primitive(Kind kind, bool isPlainChar = false)
+      : kind_(kind), name_(getName(kind)), isPlainChar_(isPlainChar) {
   }
 
   static inline constexpr bool has_node_id = false;
@@ -642,9 +643,33 @@ class Primitive : public Type {
     return kind_;
   }
 
+  // True for plain `char` specifically (Int8 or UInt8, whichever `char`
+  // happens to be signed as on the target platform), as distinct from
+  // `signed char`/`unsigned char` - both pairs collapse to the same
+  // Int8/UInt8 Kind (same size, same representation, and - for every
+  // purpose introspection itself cares about, measuring sizeof/offsetof -
+  // completely interchangeable), so `kind()` alone can't recover which one
+  // a given node actually was. That distinction is a real, observable
+  // difference in C++'s type system, though (`char` and `signed char` are
+  // always two genuinely different, non-aliasing types, regardless of
+  // whether plain `char` is signed on this platform) - it only matters for
+  // naming a type in a context where the exact identity determines which
+  // declarations are reachable, e.g. resolveTypeName needing "char" rather
+  // than "int8_t" to find std::hash<std::string>'s actual specialization
+  // (see resolveTypeName's own comment on this). Set only by
+  // ClangTypeParser::enumeratePrimitive, the one place this distinction is
+  // still visible (Clang's own AST, not the underlying Int8/UInt8
+  // representation) - false (the default) everywhere else, including
+  // DrgnParser, which has no equivalent source-level spelling available to
+  // it in the first place (DWARF's own encoding doesn't preserve it either).
+  bool isPlainChar() const {
+    return isPlainChar_;
+  }
+
  private:
   Kind kind_;
   std::string name_;
+  bool isPlainChar_;
 
   static std::string getName(Kind kind);
 };

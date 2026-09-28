@@ -249,7 +249,14 @@ size_t calculateExclusiveSize(const Type& t) {
 
 }  // namespace
 
-void genNames(const TypeGraph& typeGraph, std::string& code) {
+// Forward declaration - defined much further down, alongside the rest of
+// the reconstruction machinery it belongs with. genNames (just below) needs
+// it for the reconstruction-mode extra-NameProvider-specialization case
+// (see its own use of it for why).
+std::string resolveTypeName(Type& t);
+
+void genNames(const TypeGraph& typeGraph, std::string& code,
+             bool forReconstruct = false) {
   code += R"(
 template <typename T>
 struct NameProvider;
@@ -263,7 +270,7 @@ struct NameProvider<DummySizedOperator<N, align, Id>> {
 )";
 
   // TODO: stop types being duplicated at this point and remove this check
-  std::unordered_set<std::string_view> emittedTypes;
+  std::unordered_set<std::string> emittedTypes;
   for (const Type& t : typeGraph.finalTypes) {
     if (dynamic_cast<const Typedef*>(&t))
       continue;
@@ -275,6 +282,54 @@ struct NameProvider<DummySizedOperator<N, align, Id>> {
     code += "> { static constexpr std::array<std::string_view, 1> names = {\"";
     code += t.inputName();
     code += "\"}; };\n";
+
+    // A container-typed member's field is declared (see genDefsClass/
+    // genDefsTypedef's own matching comment) via resolveTypeName rather
+    // than t.name() whenever reconstruction is also being generated - so
+    // make_field<Ctx, T> for that same member looks up NameProvider<T>
+    // keyed by *that* name, not t.name(). The two names are frequently
+    // textually different (resolveTypeName omits any trailing parameter
+    // that matches the container's own default, e.g. "std::deque<int32_t>"
+    // vs t.name()'s "std::deque<int32_t, std::allocator<int32_t>>") but
+    // *mean the same type* whenever that's the only difference - emitting
+    // a second NameProvider specialization for those would be a duplicate
+    // specialization of the exact same type, a hard compile error, not
+    // just redundant. A second specialization is only ever genuinely
+    // needed - naming a *different* type - when t.name() contains either
+    // an introspection-only stub OIL substituted for one of this
+    // container's "extra" parameters (see resolveTypeName's own comment;
+    // always spelled "DummySizedOperator<...>") or a `char` t.name() gets
+    // wrong in the first place (spelled "int8_t"/"uint8_t" - see
+    // Primitive::isPlainChar's own comment) - checking for those two
+    // substrings directly, rather than a general (and much more involved)
+    // "do these two spellings name the same type" comparison, is sufficient
+    // because they're the only two ways resolveTypeName's output can differ
+    // from t.name() by more than an omitted default. Skipped entirely for
+    // anything without its own `reconstruct` text (own class members
+    // recurse via resolveTypeName correctly regardless, but calling it here
+    // on e.g. an F14 container with no reconstruct_kind at all could
+    // spuriously throw for an incompatible stubbed parameter nobody's
+    // reconstructing in the first place - see emitReconstructValue's own
+    // guard for the same check).
+    bool nameMayDiffer = t.name().find("DummySizedOperator") != std::string::npos ||
+                        t.name().find("int8_t") != std::string::npos ||
+                        t.name().find("uint8_t") != std::string::npos;
+    if (forReconstruct && nameMayDiffer) {
+      if (auto* cont = dynamic_cast<const Container*>(&t);
+          cont && !cont->containerInfo_.codegen.reconstruct.empty()) {
+        std::string reconstructName =
+            resolveTypeName(const_cast<Container&>(*cont));
+        if (emittedTypes.emplace(reconstructName).second) {
+          code += "template <> struct NameProvider<";
+          code += reconstructName;
+          code +=
+              "> { static constexpr std::array<std::string_view, 1> names = "
+              "{\"";
+          code += t.inputName();
+          code += "\"}; };\n";
+        }
+      }
+    }
   }
 }
 
@@ -440,8 +495,24 @@ void genDefsClass(const Class& c, std::string& code, bool forReconstruct) {
   code += "};\n\n";
 }
 
-void genDefsTypedef(const Typedef& td, std::string& code) {
-  code += "using " + td.name() + " = " + td.underlyingType().name() + ";\n";
+void genDefsTypedef(const Typedef& td, std::string& code,
+                    bool forReconstruct) {
+  // Same reasoning as genDefsClass's own container-typed-member special
+  // case, and needed for the same reason: a top-level member whose own
+  // declared type is itself a container (e.g. `std::string s;` - the
+  // standard library's own `using string = basic_string<char, ...>;`)
+  // shows up here as a Typedef wrapping that Container, rather than as a
+  // Container the member points at directly the way a *nested* occurrence
+  // (e.g. a template argument) does - so it needs the exact same
+  // resolveTypeName substitution, or it hits the exact same problem: an
+  // introspection-only stub, or (as first found via std::string
+  // specifically) `char` misnamed as `int8_t`, baked into this typedef's
+  // own definition instead of the member that uses it.
+  auto* cont = forReconstruct ? dynamic_cast<Container*>(&td.underlyingType())
+                              : nullptr;
+  code += "using " + td.name() + " = " +
+          (cont ? resolveTypeName(*cont) : td.underlyingType().name()) +
+          ";\n";
 }
 
 void genDefs(const TypeGraph& typeGraph, std::string& code,
@@ -450,7 +521,7 @@ void genDefs(const TypeGraph& typeGraph, std::string& code,
     if (const auto* c = dynamic_cast<const Class*>(&t)) {
       genDefsClass(*c, code, forReconstruct);
     } else if (const auto* td = dynamic_cast<const Typedef*>(&t)) {
-      genDefsTypedef(*td, code);
+      genDefsTypedef(*td, code, forReconstruct);
     }
   }
 }
@@ -1530,7 +1601,7 @@ void CodeGen::generate(TypeGraph& typeGraph,
   genDefs(typeGraph, code, forReconstruct);
   genStaticAsserts(typeGraph, code);
   if (config_.features[Feature::TreeBuilderV2]) {
-    genNames(typeGraph, code);
+    genNames(typeGraph, code, forReconstruct);
     genExclusiveSizes(typeGraph, code);
   }
 
@@ -1678,8 +1749,23 @@ std::string resolveTypeName(Type& t) {
   if (auto* cb = dynamic_cast<CycleBreaker*>(&resolved))
     return "OICycleBreaker<" + resolveTypeName(cb->underlyingType()) + ">";
 
-  if (auto* prim = dynamic_cast<Primitive*>(&resolved))
+  if (auto* prim = dynamic_cast<Primitive*>(&resolved)) {
+    // Primitive::name() always spells an Int8/UInt8 as "int8_t"/"uint8_t" -
+    // correct for a real signed/unsigned char, but wrong for plain `char`,
+    // a genuinely different C++ type despite sharing the same size,
+    // representation, and Kind (see Primitive::isPlainChar's own comment
+    // for why that distinction still matters here specifically). Reaching
+    // for "int8_t" instead of "char" breaks reconstruction outright for
+    // anything keyed or templated on it - e.g. a captured
+    // std::string-keyed container would otherwise try to reconstruct
+    // std::unordered_map<std::basic_string<int8_t>, ...>, and
+    // std::hash/std::equal_to have no specialization for
+    // std::basic_string<int8_t> (only for std::basic_string<char>, i.e.
+    // std::string) - a hard compile error, not a behavioural difference.
+    if (prim->isPlainChar())
+      return "char";
     return prim->name();
+  }
 
   // Enums are re-declared as flat, independent `enum class Name : uintN_t
   // {};` types by genDeclsEnum (see genDecls' dispatch) whenever a class
