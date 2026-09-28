@@ -130,6 +130,23 @@ for (const auto& kv : container) {
 return tail.finish();
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "map" calling convention, already proven on std::map. resolveTypeName
+# (CodeGen.cpp) now refuses to reconstruct this container at all when its
+# hasher/key-equal was stubbed *and* stateful - see its own comment - so
+# this reconstruct text only ever runs for the safe (empty hasher) case.
+reconstruct_kind = "map"
+reconstruct = """
+%1%<T0, T1> result;
+for (size_t i = 0; i < length; i++) {
+  auto entry = nextEntry();
+  result.emplace(std::move(entry.first), std::move(entry.second));
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
 func = """

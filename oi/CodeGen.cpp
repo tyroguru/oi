@@ -55,6 +55,8 @@ using type_graph::Class;
 using type_graph::Container;
 using type_graph::CycleBreaker;
 using type_graph::DetectCycles;
+using type_graph::Dummy;
+using type_graph::DummyAllocator;
 using type_graph::EnforceCompatibility;
 using type_graph::Enum;
 using type_graph::Flattener;
@@ -380,7 +382,13 @@ void CodeGen::genDefsThrift(const TypeGraph& typeGraph, std::string& code) {
 
 namespace {
 
-void genDefsClass(const Class& c, std::string& code) {
+// Forward declaration - defined much further down, alongside the rest of
+// the reconstruction machinery it belongs with. genDefsClass (just below)
+// needs it for the reconstruction-mode struct redeclaration case (see its
+// own use of it for why).
+std::string resolveTypeName(Type& t);
+
+void genDefsClass(const Class& c, std::string& code, bool forReconstruct) {
   if (c.kind() == Class::Kind::Union)
     code += "union ";
   else
@@ -403,7 +411,27 @@ void genDefsClass(const Class& c, std::string& code) {
 
   code += c.name() + " {\n";
   for (const auto& mem : c.members) {
-    code += "  " + mem.type().name() + " " + mem.name;
+    // A container-typed member's own cached name (mem.type().name(),
+    // computed once by NameGen) bakes in any introspection-only stub OIL
+    // substituted for one of its "extra" template parameters (e.g. an
+    // unordered_map's hasher/key-equal - see TypeIdentifier::visit(Container&)
+    // and std_unordered_map_type.toml's own comment on why that stub
+    // exists). That stub is the right type for introspection's own
+    // size/layout mirror, but it's never a real, usable type - nothing can
+    // construct a value of it - so it can't be the declared type of a field
+    // reconstruction is actually going to assign a real value into.
+    // resolveTypeName produces the same real-default-arguments spelling
+    // this container's own toml `reconstruct` text already relies on
+    // (e.g. "std::unordered_map<int32_t, int32_t>"), and throws instead if
+    // a stubbed parameter turns out to be stateful (non-zero size) - see
+    // its own comment for why that case can't be guessed at safely.
+    // Introspection-only codegen never hits this: forReconstruct is only
+    // ever true when this struct's own redeclaration is also going to
+    // back a reconstructImpl<T>.
+    auto* cont = forReconstruct ? dynamic_cast<Container*>(&mem.type())
+                                : nullptr;
+    code += "  " + (cont ? resolveTypeName(*cont) : mem.type().name()) + " " +
+            mem.name;
     if (mem.bitsize) {
       code += " : " + std::to_string(mem.bitsize);
     }
@@ -416,10 +444,11 @@ void genDefsTypedef(const Typedef& td, std::string& code) {
   code += "using " + td.name() + " = " + td.underlyingType().name() + ";\n";
 }
 
-void genDefs(const TypeGraph& typeGraph, std::string& code) {
+void genDefs(const TypeGraph& typeGraph, std::string& code,
+            bool forReconstruct = false) {
   for (const Type& t : typeGraph.finalTypes) {
     if (const auto* c = dynamic_cast<const Class*>(&t)) {
-      genDefsClass(*c, code);
+      genDefsClass(*c, code, forReconstruct);
     } else if (const auto* td = dynamic_cast<const Typedef*>(&t)) {
       genDefsTypedef(*td, code);
     }
@@ -1429,7 +1458,8 @@ void CodeGen::transform(TypeGraph& typeGraph) {
 
 void CodeGen::generate(TypeGraph& typeGraph,
                        std::string& code,
-                       RootFunctionName rootName) {
+                       RootFunctionName rootName,
+                       bool forReconstruct) {
   code.clear();
   addPreprocessorDefines(config_, code);
   code += headers::oi_OITraceCode_cpp;
@@ -1497,7 +1527,7 @@ void CodeGen::generate(TypeGraph& typeGraph,
   FuncGen::DeclareGetContainer(code);
 
   genDecls(typeGraph, code);
-  genDefs(typeGraph, code);
+  genDefs(typeGraph, code, forReconstruct);
   genStaticAsserts(typeGraph, code);
   if (config_.features[Feature::TreeBuilderV2]) {
     genNames(typeGraph, code);
@@ -1653,7 +1683,59 @@ std::string resolveTypeName(Type& t) {
     // be a valid type.
     if (cont->templateParams.size() >= 2)
       name += ", " + resolveTypeName(cont->templateParams[1].type());
-    return name + ">";
+    name += ">";
+
+    // Any further ("extra", behavior-configuring) template parameters -
+    // Compare/Allocator for an ordered container, GrowthPolicy/Container
+    // for folly::sorted_vector_set, Hash/KeyEqual/Allocator for a hash
+    // table, etc - are deliberately never named above: reconstruction
+    // relies on the container's own default template argument to supply
+    // them, exactly as e.g. set_type.toml's `reconstruct` text already
+    // does. That's safe whenever the real parameter is left untouched
+    // (ClangTypeParser's `pass_through` list - std::less/std::allocator/etc
+    // - or simply wasn't stubbed at all), since it's then either identical
+    // to or interchangeable with the default. It stops being safe for a
+    // parameter OIL *has* replaced with an introspection-only placeholder
+    // (see TypeIdentifier::visit(Container&) and
+    // std_unordered_map_type.toml's own comment on the hasher/key-equal):
+    // if the real parameter it stands in for was empty/stateless (the
+    // overwhelming common case - e.g. plain std::hash<K>), the container's
+    // default is layout-identical (empty-base-optimised either way) and
+    // behaviourally equivalent (a hash table's contract never exposes
+    // bucket order), so substituting it is fine. If the real parameter was
+    // stateful (a genuine custom hasher/comparator/allocator carrying its
+    // own data), there is no default that could reproduce it, and this
+    // container was never actually the type its own default template
+    // argument describes - so refuse outright here, at codegen time,
+    // rather than silently reconstruct something else.
+    for (size_t i = 2; i < cont->templateParams.size(); i++) {
+      Type& extra = cont->templateParams[i].type();
+      size_t stubbedSize;
+      std::string_view stubbedName;
+      if (auto* dummy = dynamic_cast<Dummy*>(&extra)) {
+        stubbedSize = dummy->size();
+        stubbedName = dummy->inputName();
+      } else if (auto* dummyAlloc = dynamic_cast<DummyAllocator*>(&extra)) {
+        stubbedSize = dummyAlloc->size();
+        stubbedName = dummyAlloc->inputName();
+      } else {
+        continue;
+      }
+      if (stubbedSize > 0) {
+        throw std::runtime_error(
+            "CodeGen::resolveTypeName: " + cont->containerInfo_.typeName +
+            "'s template parameter " + std::to_string(i) + " (`" +
+            std::string(stubbedName) + "`, " + std::to_string(stubbedSize) +
+            " bytes) is a stateful type that OIL replaced with a "
+            "size-matched placeholder for introspection safety - "
+            "reconstructing it would mean guessing that state, which isn't "
+            "safe, so " +
+            cont->containerInfo_.typeName +
+            " cannot be reconstructed here with a custom, stateful "
+            "hasher/comparator/allocator");
+      }
+    }
+    return name;
   }
 
   // A raw pointer - unlike every other case above, this doesn't need
@@ -1995,7 +2077,7 @@ void CodeGen::generateReconstructClassPreamble(TypeGraph& typeGraph,
   code += "namespace OIInternal {\nnamespace {\n";
   defineInternalTypes(code);  // OIArray<>, used by padding members below
   genDecls(typeGraph, code);
-  genDefs(typeGraph, code);
+  genDefs(typeGraph, code, /* forReconstruct = */ true);
   // Needed for generateReconstructClassBody's per-member
   // TypeHandler<Ctx, T>::type::describe use, including for a
   // container-typed member - must come after genDefs (see this
