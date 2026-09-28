@@ -32,3 +32,77 @@ void getSizeType(const %1%<T, Container, Cmp> &containerAdapter, size_t& returnA
     getSizeType(container, returnArg);
 }
 """
+
+# TreeBuilder-v2 support (capture and, below, reconstruction - see
+# docs/object-capture-initial-thoughts.md, not part of this repo). See
+# stack_container_adapter_type.toml's matching comment - same
+# container-agnostic "length + elements" wire shape via get_container().
+# Unlike stack/queue, std::priority_queue also stores a Compare member
+# alongside its underlying container - accounted for the same way every
+# other Compare-bearing container already is (this container's own
+# stub_template_params above), not by this traversal_func, which - same as
+# every other container that leaves its own "extra" parameters unnamed -
+# never needs to know what Compare actually is to capture the elements
+# themselves.
+traversal_func = """
+const auto& underlying = get_container(container);
+
+auto tail = returnArg
+  .write((uintptr_t)&container)
+  .write(underlying.size());
+
+for (auto&& it : underlying) {
+  tail = tail.delegate([&ctx, &it](auto ret) {
+    return OIInternal::getSizeType<Ctx>(ctx, it, ret);
+  });
+}
+
+return tail.finish();
+"""
+
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "list" calling convention. Unlike stack/queue, std::priority_queue::push()
+# doesn't simply forward to the underlying container - it maintains a
+# binary heap over Compare, so replaying captured elements (captured in
+# the *already-heapified* raw storage order, not sorted order) via push()
+# doesn't reproduce the identical internal byte layout. That's fine:
+# priority_queue's own public contract never exposes its internal
+# arrangement, only top()/pop() in priority order, which push() maintains
+# correctly regardless of insertion order - the same "internal layout
+# differs, observable behavior doesn't" reasoning already relied on for a
+# hash table's bucket order. Container (T1) is named explicitly rather than
+# left to its own default, same as stack/queue - see
+# countRealTemplateParams's own comment on why that's needed here (Compare,
+# still left unnamed, is fine either way - see the traversal_func comment
+# above).
+reconstruct_kind = "list"
+reconstruct = """
+%1%<T0, T1> result;
+for (size_t i = 0; i < length; i++) {
+  result.push(nextElement());
+}
+return result;
+"""
+
+[[codegen.processor]]
+type = "types::st::VarInt<DB>"
+func = """
+el.pointer = std::get<ParsedData::VarInt>(d.val).value;
+"""
+
+[[codegen.processor]]
+type = "types::st::List<DB, typename TypeHandler<Ctx, T0>::type>"
+func = """
+static constexpr auto childField = make_field<Ctx, T0>("[]");
+
+auto list = std::get<ParsedData::List>(d.val);
+el.container_stats.emplace(result::Element::ContainerStats {
+  .capacity = list.length,
+  .length = list.length,
+});
+
+for (size_t i = 0; i < list.length; i++)
+  stack_ins(childField);
+"""
