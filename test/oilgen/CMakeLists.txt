@@ -133,3 +133,7 @@ endfunction()
 add_oilgen_aot_test(oilgen_aot_plain_struct
   AotPlainStruct.cpp
 )
+
+add_oilgen_aot_test(oilgen_aot_multiple_roots
+  AotMultipleRoots.cpp
+)
