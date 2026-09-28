@@ -82,9 +82,15 @@ class CodeGen {
   void addDrgnRoot(struct drgn_type* drgnType,
                    type_graph::TypeGraph& typeGraph);
   void transform(type_graph::TypeGraph& typeGraph);
+  // forReconstruct: true when a reconstructImpl<T> for this same root is
+  // also going to be generated against this struct's own OIInternal
+  // redeclaration (via appendReconstructFunctionBody, right after this
+  // call) - see genDefsClass's own comment for what that changes about a
+  // container-typed member's declared type.
   void generate(type_graph::TypeGraph& typeGraph,
                 std::string& code,
-                RootFunctionName rootName);
+                RootFunctionName rootName,
+                bool forReconstruct = false);
 
   /*
    * Research groundwork for byte-accurate object capture (see

@@ -231,7 +231,8 @@ int OIGenerator::generate(clang::tooling::CompilationDatabase& db,
   std::string code;
   if (haveIntrospect) {
     const auto& linkageName = ctx.nameToTypeMap.begin()->first;
-    codegen.generate(ctx.typeGraph, code, CodeGen::ExactName{linkageName});
+    codegen.generate(ctx.typeGraph, code, CodeGen::ExactName{linkageName},
+                     /* forReconstruct = */ haveReconstruct);
   }
   if (haveReconstruct) {
     const auto& linkageName = ctx.nameToReconstructTypeMap.begin()->first;
