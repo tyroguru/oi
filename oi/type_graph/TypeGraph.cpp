@@ -18,9 +18,14 @@
 namespace oi::detail::type_graph {
 
 template <>
-Primitive& TypeGraph::makeType<Primitive>(Primitive::Kind kind) {
+Primitive& TypeGraph::makeType<Primitive>(Primitive::Kind kind,
+                                          bool isPlainChar) {
   switch (kind) {
     case Primitive::Kind::Int8:
+      if (isPlainChar) {
+        static Primitive pChar{kind, /* isPlainChar = */ true};
+        return pChar;
+      }
       static Primitive pInt8{kind};
       return pInt8;
     case Primitive::Kind::Int16:
@@ -33,6 +38,10 @@ Primitive& TypeGraph::makeType<Primitive>(Primitive::Kind kind) {
       static Primitive pInt64{kind};
       return pInt64;
     case Primitive::Kind::UInt8:
+      if (isPlainChar) {
+        static Primitive pUChar{kind, /* isPlainChar = */ true};
+        return pUChar;
+      }
       static Primitive pUInt8{kind};
       return pUInt8;
     case Primitive::Kind::UInt16:

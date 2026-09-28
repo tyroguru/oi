@@ -426,13 +426,24 @@ Primitive& ClangTypeParser::enumeratePrimitive(const clang::BuiltinType& ty) {
     case clang::BuiltinType::Bool:
       return makeType<Primitive>(ty, Primitive::Kind::Bool);
 
+    // Char_U/Char_S are plain `char` (on a platform where it's
+    // unsigned/signed, respectively) - a genuinely different type from
+    // UChar/SChar (`unsigned char`/`signed char`) despite sharing the same
+    // size and representation (and so the same Int8/UInt8 Kind) - see
+    // Primitive::isPlainChar's own comment for why that distinction is
+    // preserved here specifically, rather than collapsed like every other
+    // same-Kind spelling.
     case clang::BuiltinType::Char_U:
+      return makeType<Primitive>(ty, Primitive::Kind::UInt8,
+                                 /* isPlainChar = */ true);
     case clang::BuiltinType::UChar:
       return makeType<Primitive>(ty, Primitive::Kind::UInt8);
     case clang::BuiltinType::WChar_U:
       return makeType<Primitive>(ty, Primitive::Kind::UInt32);
 
     case clang::BuiltinType::Char_S:
+      return makeType<Primitive>(ty, Primitive::Kind::Int8,
+                                 /* isPlainChar = */ true);
     case clang::BuiltinType::SChar:
       return makeType<Primitive>(ty, Primitive::Kind::Int8);
     case clang::BuiltinType::WChar_S:

@@ -48,9 +48,14 @@ class TypeGraph {
   }
 
   // Override of the generic makeType function that returns singleton Primitive
-  // objects
+  // objects - two per Kind for Int8/UInt8 specifically (one for plain `char`,
+  // one for `signed`/`unsigned char`), since those are the only Kinds a
+  // single Primitive::Kind value can correspond to two genuinely different
+  // C++ types for - see Primitive::isPlainChar's own comment for why. Every
+  // other Kind only ever has one real, unambiguous spelling, so
+  // isPlainChar is simply ignored (always false in practice) for those.
   template <typename T>
-  Primitive& makeType(Primitive::Kind kind);
+  Primitive& makeType(Primitive::Kind kind, bool isPlainChar = false);
 
   template <typename T, typename... Args>
   T& makeType(NodeId id, Args&&... args) {
