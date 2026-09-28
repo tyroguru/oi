@@ -54,6 +54,24 @@ traversal_func = '''
     return tail.finish();
 '''
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "map" calling convention, already proven on std::map/std::unordered_map -
+# identical reconstruct text works unchanged here: folly::sorted_vector_map
+# supports the same emplace() API, and its own captureKeys-conditional
+# processor above is the exact same shape std_map_type.toml already
+# exercises, so nextEntry() needed no changes either.
+reconstruct_kind = "map"
+reconstruct = """
+%1%<T0, T1> result;
+for (size_t i = 0; i < length; i++) {
+  auto entry = nextEntry();
+  result.emplace(std::move(entry.first), std::move(entry.second));
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::VarInt<DB>"
 func = "el.pointer = std::get<ParsedData::VarInt>(d.val).value;"

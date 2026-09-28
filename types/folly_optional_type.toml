@@ -40,6 +40,21 @@ if (container.has_value()) {
 }
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "optional" calling convention, already proven on std::optional -
+# identical reconstruct text works unchanged: folly::Optional supports the
+# same default-construct-when-empty / construct-from-value-when-present
+# API.
+reconstruct_kind = "optional"
+reconstruct = """
+if (present) {
+  return %1%<T0>(valueVal());
+}
+return %1%<T0>();
+"""
+
 [[codegen.processor]]
 type = "types::st::Sum<DB, types::st::Unit<DB>, typename TypeHandler<Ctx, T0>::type>"
 func = """

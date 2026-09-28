@@ -35,6 +35,18 @@ traversal_func = """
     );
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "pair" calling convention (a new, small kind: same T0/T1 shape as "map",
+# but a fixed two-element pair rather than a variable-length list of them -
+# std::pair's own content processor below is a bare Pair<T0,T1>, no length
+# prefix at all).
+reconstruct_kind = "pair"
+reconstruct = """
+return %1%<T0, T1>(std::move(first), std::move(second));
+"""
+
 [[codegen.processor]]
 type = "types::st::Pair<DB, typename TypeHandler<Ctx, T0>::type, typename TypeHandler<Ctx, T1>::type>"
 func = """

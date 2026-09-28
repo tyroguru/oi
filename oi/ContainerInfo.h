@@ -73,6 +73,21 @@ struct ContainerInfo {
      *   `length` and `nextEntry()` (decodes and returns the next entry as
      *   a std::pair<T0, T1> - key first, value second) are in scope.
      *
+     *   "pair" - a fixed, two-element container (std::pair itself) - the
+     *   same T0/T1 shape as "map", but exactly one of each rather than a
+     *   variable-length list of entries, so there's no `length`/`nextEntry`
+     *   to call. `first` and `second` (already-reconstructed values of
+     *   type T0 and T1 respectively) are in scope directly.
+     *
+     *   "optional" - a single, possibly-absent *value*, stored inline
+     *   rather than through a captured address (std::optional,
+     *   folly::Optional - unlike "pointer"-kind's std::unique_ptr/
+     *   std::shared_ptr, which own a separately-identified heap
+     *   allocation, so aliasing/cycles can never apply here). `present`
+     *   (a bool) is always in scope; `valueVal()` (decodes and returns
+     *   the value, of type T0 - must be called at most once, and only
+     *   when `present` is true) is in scope too.
+     *
      *   "pointer" - a single, possibly-absent owned value (std::unique_ptr,
      *   std::shared_ptr - std::weak_ptr and raw pointers share the same
      *   underlying wire shape but aren't wired up to this calling
