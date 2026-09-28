@@ -52,6 +52,27 @@ for (const auto &it : container) {
 return tail.finish();
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "list" calling convention, already proven on std::multiset -
+# identical shape (length + nextElement() + insert()), keeping duplicates
+# (a multiset legitimately keeps duplicate keys, and insert() already does
+# that correctly). This container's Hash/KeyEqual are unconditionally
+# stubbed for introspection safety (see the traversal_func comment above
+# and std_unordered_map_type.toml's matching one) - CodeGen.cpp's
+# resolveTypeName only allows reconstructing this when the real
+# hasher/key-equal was empty/stateless, refusing outright at codegen time
+# otherwise (see its own comment for why that's safe).
+reconstruct_kind = "list"
+reconstruct = """
+%1%<T0> result;
+for (size_t i = 0; i < length; i++) {
+  result.insert(nextElement());
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::VarInt<DB>"
 func = """
