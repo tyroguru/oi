@@ -252,13 +252,14 @@ void FuncGen::DefineStoreData(std::string& testCode) {
 }
 
 void FuncGen::DefineTopLevelIntrospect(std::string& code,
-                                       const std::string& type) {
+                                       const std::string& type,
+                                       const std::string& rootTypeAlias) {
   std::string func = R"(
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunknown-attributes"
 /* RawType: %1% */
 void __attribute__((used, retain)) introspect_%2$016x(
-    const OIInternal::__ROOT_TYPE__& t,
+    const OIInternal::%3%& t,
     std::vector<uint8_t>& v)
 #pragma GCC diagnostic pop
 {
@@ -276,20 +277,22 @@ void __attribute__((used, retain)) introspect_%2$016x(
   Context ctx{ .pointers = *pointers };
   ctx.pointers.add((uintptr_t)&t);
 
-  using ContentType = OIInternal::TypeHandler<Context, OIInternal::__ROOT_TYPE__>::type;
+  using ContentType = OIInternal::TypeHandler<Context, OIInternal::%3%>::type;
 
   ContentType ret{Context::DataBuffer{v}};
   OIInternal::getSizeType<Context>(ctx, t, ret);
 }
 )";
 
-  code.append(
-      (boost::format(func) % type % std::hash<std::string>{}(type)).str());
+  code.append((boost::format(func) % type % std::hash<std::string>{}(type) %
+               rootTypeAlias)
+                  .str());
 }
 
 void FuncGen::DefineTopLevelIntrospectNamed(std::string& code,
                                             const std::string& type,
-                                            const std::string& linkageName) {
+                                            const std::string& linkageName,
+                                            const std::string& rootTypeAlias) {
   std::string typeHash =
       (boost::format("%1$016x") % std::hash<std::string>{}(type)).str();
 
@@ -298,7 +301,9 @@ void FuncGen::DefineTopLevelIntrospectNamed(std::string& code,
   code += " */\n";
   code += "extern \"C\" IntrospectionResult ";
   code += linkageName;
-  code += "(const OIInternal::__ROOT_TYPE__& t) {\n";
+  code += "(const OIInternal::";
+  code += rootTypeAlias;
+  code += "& t) {\n";
   code += "  std::vector<uint8_t> v{};\n";
   code += "  introspect_";
   code += typeHash;
@@ -366,11 +371,20 @@ void FuncGen::DefineTopLevelGetSizeRef(std::string& testCode,
   testCode.append(fmt.str());
 }
 
+// Referencing the bare (unqualified) `FakeContext` name here relies on it
+// already having been declared exactly once, earlier in this same
+// translation unit's shared (single, TU-wide) anonymous namespace - see
+// CodeGen::generateSharedDefinitions. It's deliberately not declared here:
+// this function is called once per introspect root (see
+// CodeGen::generateIntrospectRoot), and FakeContext's own definition
+// doesn't depend on which root is being processed, so redeclaring it per
+// root would be a redefinition error in a multi-root translation unit.
 void FuncGen::DefineTreeBuilderInstructions(
     std::string& code,
     const std::string& rawType,
     size_t exclusiveSize,
-    std::span<const std::string_view> typeNames) {
+    std::span<const std::string_view> typeNames,
+    const std::string& rootTypeAlias) {
   std::string typeHash =
       (boost::format("%1$016x") % std::hash<std::string>{}(rawType)).str();
 
@@ -378,9 +392,6 @@ void FuncGen::DefineTreeBuilderInstructions(
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunknown-attributes"
 namespace {
-struct FakeContext {
-  using DataBuffer = int;
-};
 const std::array<std::string_view, )";
   code += std::to_string(typeNames.size());
   code += "> typeNames";
@@ -394,16 +405,19 @@ const std::array<std::string_view, )";
   code += "};\n";
   code += "const exporters::inst::Field rootInstructions";
   code += typeHash;
-  code += "{sizeof(OIInternal::__ROOT_TYPE__), ";
+  code += "{sizeof(OIInternal::";
+  code += rootTypeAlias;
+  code += "), ";
   code += std::to_string(exclusiveSize);
   code += ", \"a0\", typeNames";
   code += typeHash;
-  code +=
-      ", OIInternal::TypeHandler<FakeContext, "
-      "OIInternal::__ROOT_TYPE__>::fields, "
-      "OIInternal::TypeHandler<FakeContext, "
-      "OIInternal::__ROOT_TYPE__>::processors, "
-      "std::is_fundamental_v<OIInternal::__ROOT_TYPE__>};\n";
+  code += ", OIInternal::TypeHandler<FakeContext, OIInternal::";
+  code += rootTypeAlias;
+  code += ">::fields, OIInternal::TypeHandler<FakeContext, OIInternal::";
+  code += rootTypeAlias;
+  code += ">::processors, std::is_fundamental_v<OIInternal::";
+  code += rootTypeAlias;
+  code += ">};\n";
   code += "} // namespace\n";
   code +=
       "extern const exporters::inst::Inst __attribute__((used, retain)) "

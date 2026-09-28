@@ -53,10 +53,12 @@ class FuncGen {
   static void DeclareGetSize(std::string& testCode, const std::string& type);
 
   static void DefineTopLevelIntrospect(std::string& code,
-                                       const std::string& type);
+                                       const std::string& type,
+                                       const std::string& rootTypeAlias);
   static void DefineTopLevelIntrospectNamed(std::string& code,
                                             const std::string& type,
-                                            const std::string& linkageName);
+                                            const std::string& linkageName,
+                                            const std::string& rootTypeAlias);
 
   static void DefineTopLevelGetSizeRef(std::string& testCode,
                                        const std::string& rawType,
@@ -65,7 +67,8 @@ class FuncGen {
       std::string& testCode,
       const std::string& rawType,
       size_t exclusiveSize,
-      std::span<const std::string_view> typeNames);
+      std::span<const std::string_view> typeNames,
+      const std::string& rootTypeAlias);
 
   static void DefineTopLevelGetSizeSmartPtr(std::string& testCode,
                                             const std::string& rawType,

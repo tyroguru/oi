@@ -92,6 +92,27 @@ class CodeGen {
                 RootFunctionName rootName,
                 bool forReconstruct = false);
 
+  // generate()'s two halves, split out so a single TU can generate for
+  // multiple simultaneous oi::introspect<T>() roots (see OIGenerator::
+  // generate()'s driving loop): generateSharedDefinitions emits the single
+  // namespace OIInternal { namespace { ... } } block - genDecls/genDefs/
+  // genNames/type handlers/etc - over the *whole* (possibly multi-root)
+  // TypeGraph, and must be called exactly once per TU regardless of how
+  // many roots it contains. generateIntrospectRoot then reopens that same
+  // anonymous namespace (legal in C++) to declare just this root's own
+  // `using __ROOT_TYPE__<rootIndex> = ...;` alias plus its top-level
+  // introspectImpl<T> entry point(s), and is called once per introspect
+  // root. generate() itself remains a single-root convenience wrapper
+  // (`generateSharedDefinitions` + `generateIntrospectRoot` for root 0) for
+  // callers - e.g. codegenFromDrgn - that only ever have one root.
+  void generateSharedDefinitions(type_graph::TypeGraph& typeGraph,
+                                 std::string& code,
+                                 bool forReconstruct);
+  void generateIntrospectRoot(std::string& code,
+                              type_graph::Type& rootType,
+                              size_t rootIndex,
+                              RootFunctionName rootName);
+
   /*
    * Research groundwork for byte-accurate object capture (see
    * docs/object-capture-initial-thoughts.md, not part of this repo) -
@@ -113,18 +134,21 @@ class CodeGen {
 
   /*
    * The combined introspect+reconstruct case: appends reconstructImpl<T>'s
-   * function body to `code` right after a generate() call already
-   * populated it for introspectImpl<T> of the *same* root T (see
+   * function body to `code` right after a generateIntrospectRoot() call
+   * already populated it for introspectImpl<T> of the *same* root T (see
    * OIGenerator::generate()'s same-type check, which is what guarantees
-   * that). Unlike generateReconstruct(), does not clear `code`, does not
-   * emit includes/preamble, and - for a Class root - does not re-emit the
-   * struct's OIInternal redeclaration, since generate() already emitted an
-   * equivalent one for the same root; emitting it twice would be a
-   * redefinition error.
+   * that). `introspectRootIndex` identifies which of that TU's (possibly
+   * many) introspect roots this is - i.e. which `__ROOT_TYPE__<N>` alias to
+   * reuse - not necessarily 0. Unlike generateReconstruct(), does not clear
+   * `code`, does not emit includes/preamble, and - for a Class root - does
+   * not re-emit the struct's OIInternal redeclaration, since
+   * generateIntrospectRoot() already emitted an equivalent one for the same
+   * root; emitting it twice would be a redefinition error.
    */
   void appendReconstructFunctionBody(type_graph::TypeGraph& typeGraph,
                                      std::string& code,
-                                     RootFunctionName rootName);
+                                     RootFunctionName rootName,
+                                     size_t introspectRootIndex);
 
  private:
   void generateReconstructScalar(type_graph::Primitive& primitive,
@@ -136,6 +160,7 @@ class CodeGen {
   void generateReconstructClassBody(type_graph::TypeGraph& typeGraph,
                                     type_graph::Class& cls,
                                     const std::string& typeToHash,
+                                    const std::string& rootTypeAlias,
                                     std::string& code);
   std::string emitReconstructClassValue(type_graph::Class& cls,
                                         const std::string& parsedDataExpr,

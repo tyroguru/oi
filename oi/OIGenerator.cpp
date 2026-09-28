@@ -89,6 +89,14 @@ class ConsumerContext {
   type_graph::TypeGraph typeGraph;
   std::unordered_map<std::string, type_graph::Type*> nameToTypeMap;
   std::unordered_map<std::string, type_graph::Type*> nameToReconstructTypeMap;
+  // Each introspect root's linkage name, paired with the rootTypes() index
+  // it was added at (see HandleTranslationUnit's addRoot loop below). The
+  // index - not a Type* - is what stays valid after transform() runs, since
+  // RemoveTopLevelPointer can replace the Type& stored at a given rootTypes()
+  // slot in place. At most one reconstruct root is currently supported, so a
+  // single optional suffices for it.
+  std::vector<std::pair<std::string, size_t>> introspectRootIndices;
+  std::optional<std::pair<std::string, size_t>> reconstructRootIndex;
   std::optional<bool> pic;
   const std::vector<std::unique_ptr<ContainerInfo>>& containerInfos;
   std::set<std::string_view> typesToStub;
@@ -182,10 +190,11 @@ int OIGenerator::generate(clang::tooling::CompilationDatabase& db,
     return ret;
   }
 
-  if (ctx.nameToTypeMap.size() > 1 || ctx.nameToReconstructTypeMap.size() > 1)
+  if (ctx.nameToReconstructTypeMap.size() > 1)
     throw std::logic_error(
-        "found more than one introspect (or reconstruct) site to generate "
-        "for but we can't currently handle this case");
+        "found more than one oi::reconstruct<T>() site to generate for in "
+        "one translation unit but we can't currently handle this case "
+        "(multiple simultaneous oi::introspect<T>() sites are supported)");
 
   const bool haveIntrospect = !ctx.nameToTypeMap.empty();
   const bool haveReconstruct = !ctx.nameToReconstructTypeMap.empty();
@@ -201,51 +210,70 @@ int OIGenerator::generate(clang::tooling::CompilationDatabase& db,
     codegen.registerContainer(std::move(ptr));
   codegen.transform(ctx.typeGraph);
 
-  // Both an introspect<T>() and a reconstruct<U>() site were found - this
-  // is only supported when T and U are identical. They weren't directly
-  // comparable at addRoot() time (see HandleTranslationUnit): introspect's
-  // root was still wrapped in a Reference type-graph node there, since
-  // nothing had stripped it yet, while reconstruct's root never had one.
-  // transform()'s RemoveTopLevelPointer pass (run just above, as part of
-  // the normal pipeline) is what normalizes that away, which is why this
-  // check has to live here and not earlier. HandleTranslationUnit adding
-  // introspect's root before reconstruct's is what guarantees they land at
-  // indices 0 and 1 respectively.
+  // Both an introspect<T>() and a reconstruct<U>() site were found - this is
+  // only supported when U is identical to one of the (possibly many)
+  // introspect roots. They weren't directly comparable at addRoot() time
+  // (see HandleTranslationUnit): an introspect root was still wrapped in a
+  // Reference type-graph node there, since nothing had stripped it yet,
+  // while reconstruct's root never had one. transform()'s
+  // RemoveTopLevelPointer pass (run just above, as part of the normal
+  // pipeline) is what normalizes that away, which is why this check has to
+  // live here and not earlier. Root identity is resolved by rootTypes()
+  // index (see ConsumerContext's own comment on why), not by dereferencing
+  // the Type* stored in nameToTypeMap/nameToReconstructTypeMap.
+  std::optional<size_t> combinedIntrospectRootIndex;
   if (haveIntrospect && haveReconstruct) {
-    assert(ctx.typeGraph.rootTypes().size() == 2);
-    type_graph::Type& introspectRoot = ctx.typeGraph.rootTypes()[0];
-    type_graph::Type& reconstructRoot = ctx.typeGraph.rootTypes()[1];
-    if (&introspectRoot != &reconstructRoot) {
-      throw std::logic_error(
-          "oi::introspect<T>() and oi::reconstruct<U>() for different types "
-          "in the same translation unit are not yet supported - T and U "
-          "must currently be identical");
+    type_graph::Type& reconstructRoot =
+        ctx.typeGraph.rootTypes()[ctx.reconstructRootIndex->second];
+    for (const auto& [name, index] : ctx.introspectRootIndices) {
+      type_graph::Type& introspectRoot = ctx.typeGraph.rootTypes()[index];
+      if (&introspectRoot == &reconstructRoot) {
+        combinedIntrospectRootIndex = index;
+        break;
+      }
     }
-    // Same underlying root, just added twice (once per map) - drop the
-    // redundant second entry so CodeGen's "exactly one root" assumption
-    // (generate()/generateReconstruct()/appendReconstructFunctionBody())
-    // still holds.
-    ctx.typeGraph.rootTypes().pop_back();
+    if (!combinedIntrospectRootIndex) {
+      throw std::logic_error(
+          "oi::introspect<T>() and oi::reconstruct<U>() for unrelated types "
+          "in the same translation unit are not yet supported - U must be "
+          "identical to one of this translation unit's oi::introspect<T>() "
+          "root types");
+    }
   }
 
   std::string code;
   if (haveIntrospect) {
-    const auto& linkageName = ctx.nameToTypeMap.begin()->first;
-    codegen.generate(ctx.typeGraph, code, CodeGen::ExactName{linkageName},
-                     /* forReconstruct = */ haveReconstruct);
+    // forReconstruct is TU-wide (affects how every reachable class's
+    // container-typed members are spelled - see genDefsClass's own
+    // comment), not scoped to just the paired root - true whenever the
+    // lone reconstruct site (if any) is being combined with one of these
+    // introspect roots.
+    codegen.generateSharedDefinitions(
+        ctx.typeGraph,
+        code,
+        /* forReconstruct = */ combinedIntrospectRootIndex.has_value());
+    for (const auto& [linkageName, index] : ctx.introspectRootIndices) {
+      codegen.generateIntrospectRoot(code,
+                                     ctx.typeGraph.rootTypes()[index],
+                                     index,
+                                     CodeGen::ExactName{linkageName});
+    }
   }
   if (haveReconstruct) {
-    const auto& linkageName = ctx.nameToReconstructTypeMap.begin()->first;
-    if (haveIntrospect) {
-      // Same root as the generate() call just above (enforced by the
-      // type-identity check above) - append reconstructImpl<T>'s function
-      // body to the code generate() already produced, instead of emitting
-      // a second, colliding copy of T's OIInternal redeclaration.
-      codegen.appendReconstructFunctionBody(ctx.typeGraph, code,
-                                            CodeGen::ExactName{linkageName});
+    const auto& linkageName = ctx.reconstructRootIndex->first;
+    if (combinedIntrospectRootIndex) {
+      // Same root as one of the generateIntrospectRoot() calls just above
+      // (enforced by the type-identity check above) - append
+      // reconstructImpl<T>'s function body to the code that call already
+      // produced, instead of emitting a second, colliding copy of T's
+      // OIInternal redeclaration.
+      codegen.appendReconstructFunctionBody(ctx.typeGraph,
+                                            code,
+                                            CodeGen::ExactName{linkageName},
+                                            *combinedIntrospectRootIndex);
     } else {
-      codegen.generateReconstruct(ctx.typeGraph, code,
-                                  CodeGen::ExactName{linkageName});
+      codegen.generateReconstruct(
+          ctx.typeGraph, code, CodeGen::ExactName{linkageName});
     }
   }
 
@@ -365,8 +393,7 @@ class CreateTypeGraphConsumer : public clang::ASTConsumer {
                 // reconstructImpl<T>(std::span<const uint8_t>) - T comes
                 // from the template argument, unlike introspectImpl<T>
                 // above where T is the (unrelated) parameter type.
-                const auto* templateArgs =
-                    fd->getTemplateSpecializationArgs();
+                const auto* templateArgs = fd->getTemplateSpecializationArgs();
                 assert(templateArgs && templateArgs->size() == 1);
                 const clang::Type* type =
                     templateArgs->get(0).getAsType().getTypePtr();
@@ -392,14 +419,19 @@ class CreateTypeGraphConsumer : public clang::ASTConsumer {
     // They only become comparable once transform()'s RemoveTopLevelPointer
     // pass has normalized both - see OIGenerator::generate(), which does
     // that comparison (and the corresponding rootTypes() cleanup) after
-    // calling transform(). Order matters: introspect's root (if any) must
-    // land at index 0 and reconstruct's at index 1, since that's what lets
-    // generate() find them again post-transform without keeping its own
-    // separate Type* handles.
-    for (const auto& [name, type] : ctx.nameToTypeMap)
+    // calling transform(). Every introspect root lands before the (at most
+    // one) reconstruct root - recorded here as (linkageName, rootTypes()
+    // index) pairs, since the index - not the Type* - is what stays valid
+    // once transform() runs (see ConsumerContext's own comment on this).
+    for (const auto& [name, type] : ctx.nameToTypeMap) {
+      ctx.introspectRootIndices.emplace_back(name,
+                                             ctx.typeGraph.rootTypes().size());
       ctx.typeGraph.addRoot(*type);
-    for (const auto& [name, type] : ctx.nameToReconstructTypeMap)
+    }
+    for (const auto& [name, type] : ctx.nameToReconstructTypeMap) {
+      ctx.reconstructRootIndex = {name, ctx.typeGraph.rootTypes().size()};
       ctx.typeGraph.addRoot(*type);
+    }
   }
 };
 

@@ -255,8 +255,9 @@ size_t calculateExclusiveSize(const Type& t) {
 // (see its own use of it for why).
 std::string resolveTypeName(Type& t);
 
-void genNames(const TypeGraph& typeGraph, std::string& code,
-             bool forReconstruct = false) {
+void genNames(const TypeGraph& typeGraph,
+              std::string& code,
+              bool forReconstruct = false) {
   code += R"(
 template <typename T>
 struct NameProvider;
@@ -311,9 +312,10 @@ struct NameProvider<DummySizedOperator<N, align, Id>> {
     // spuriously throw for an incompatible stubbed parameter nobody's
     // reconstructing in the first place - see emitReconstructValue's own
     // guard for the same check).
-    bool nameMayDiffer = t.name().find("DummySizedOperator") != std::string::npos ||
-                        t.name().find("int8_t") != std::string::npos ||
-                        t.name().find("uint8_t") != std::string::npos;
+    bool nameMayDiffer =
+        t.name().find("DummySizedOperator") != std::string::npos ||
+        t.name().find("int8_t") != std::string::npos ||
+        t.name().find("uint8_t") != std::string::npos;
     if (forReconstruct && nameMayDiffer) {
       if (auto* cont = dynamic_cast<const Container*>(&t);
           cont && !cont->containerInfo_.codegen.reconstruct.empty()) {
@@ -483,8 +485,8 @@ void genDefsClass(const Class& c, std::string& code, bool forReconstruct) {
     // Introspection-only codegen never hits this: forReconstruct is only
     // ever true when this struct's own redeclaration is also going to
     // back a reconstructImpl<T>.
-    auto* cont = forReconstruct ? dynamic_cast<Container*>(&mem.type())
-                                : nullptr;
+    auto* cont =
+        forReconstruct ? dynamic_cast<Container*>(&mem.type()) : nullptr;
     code += "  " + (cont ? resolveTypeName(*cont) : mem.type().name()) + " " +
             mem.name;
     if (mem.bitsize) {
@@ -495,8 +497,7 @@ void genDefsClass(const Class& c, std::string& code, bool forReconstruct) {
   code += "};\n\n";
 }
 
-void genDefsTypedef(const Typedef& td, std::string& code,
-                    bool forReconstruct) {
+void genDefsTypedef(const Typedef& td, std::string& code, bool forReconstruct) {
   // Same reasoning as genDefsClass's own container-typed-member special
   // case, and needed for the same reason: a top-level member whose own
   // declared type is itself a container (e.g. `std::string s;` - the
@@ -508,15 +509,15 @@ void genDefsTypedef(const Typedef& td, std::string& code,
   // introspection-only stub, or (as first found via std::string
   // specifically) `char` misnamed as `int8_t`, baked into this typedef's
   // own definition instead of the member that uses it.
-  auto* cont = forReconstruct ? dynamic_cast<Container*>(&td.underlyingType())
-                              : nullptr;
+  auto* cont =
+      forReconstruct ? dynamic_cast<Container*>(&td.underlyingType()) : nullptr;
   code += "using " + td.name() + " = " +
-          (cont ? resolveTypeName(*cont) : td.underlyingType().name()) +
-          ";\n";
+          (cont ? resolveTypeName(*cont) : td.underlyingType().name()) + ";\n";
 }
 
-void genDefs(const TypeGraph& typeGraph, std::string& code,
-            bool forReconstruct = false) {
+void genDefs(const TypeGraph& typeGraph,
+             std::string& code,
+             bool forReconstruct = false) {
   for (const Type& t : typeGraph.finalTypes) {
     if (const auto* c = dynamic_cast<const Class*>(&t)) {
       genDefsClass(*c, code, forReconstruct);
@@ -1531,6 +1532,17 @@ void CodeGen::generate(TypeGraph& typeGraph,
                        std::string& code,
                        RootFunctionName rootName,
                        bool forReconstruct) {
+  assert(typeGraph.rootTypes().size() == 1);
+  generateSharedDefinitions(typeGraph, code, forReconstruct);
+  generateIntrospectRoot(code,
+                         typeGraph.rootTypes()[0],
+                         /* rootIndex = */ 0,
+                         std::move(rootName));
+}
+
+void CodeGen::generateSharedDefinitions(TypeGraph& typeGraph,
+                                        std::string& code,
+                                        bool forReconstruct) {
   code.clear();
   addPreprocessorDefines(config_, code);
   code += headers::oi_OITraceCode_cpp;
@@ -1617,9 +1629,27 @@ void CodeGen::generate(TypeGraph& typeGraph,
     addGetSizeFuncDefs(typeGraph, code);
   }
 
-  assert(typeGraph.rootTypes().size() == 1);
-  Type& rootType = typeGraph.rootTypes()[0];
-  code += "\nusing __ROOT_TYPE__ = " + rootType.name() + ";\n";
+  code += "} // namespace\n} // namespace OIInternal\n";
+
+  if (config_.features[Feature::TreeBuilderV2]) {
+    // Declared exactly once here, not inside FuncGen::
+    // DefineTreeBuilderInstructions itself, since that function is called
+    // once per introspect root (see generateIntrospectRoot below) and
+    // FakeContext's definition is root-independent - redeclaring it per
+    // root would be a redefinition error in a multi-root translation unit.
+    code +=
+        "namespace {\nstruct FakeContext {\n  using DataBuffer = int;\n};"
+        "\n} // namespace\n";
+  }
+}
+
+void CodeGen::generateIntrospectRoot(std::string& code,
+                                     Type& rootType,
+                                     size_t rootIndex,
+                                     RootFunctionName rootName) {
+  std::string rootTypeAlias = "__ROOT_TYPE__" + std::to_string(rootIndex);
+  code += "\nnamespace OIInternal {\nnamespace {\n";
+  code += "using " + rootTypeAlias + " = " + rootType.name() + ";\n";
   code += "} // namespace\n} // namespace OIInternal\n";
 
   const auto& typeToHash = std::visit(
@@ -1635,8 +1665,13 @@ void CodeGen::generate(TypeGraph& typeGraph,
       rootName);
 
   if (config_.features[Feature::TreeBuilderV2]) {
-    FuncGen::DefineTopLevelIntrospect(code, typeToHash);
+    FuncGen::DefineTopLevelIntrospect(code, typeToHash, rootTypeAlias);
   } else {
+    // Unreachable from oilgen (TreeBuilderV2 is always enabled there - see
+    // OIGenerator::generate()'s featuresMap) - this non-TreeBuilderV2 path
+    // still hardcodes the un-indexed "__ROOT_TYPE__" spelling and is only
+    // ever exercised with a single root (rootIndex 0), via generate()'s own
+    // thin-wrapper call.
     FuncGen::DefineTopLevelGetSizeRef(code, typeToHash, config_.features);
   }
 
@@ -1644,11 +1679,13 @@ void CodeGen::generate(TypeGraph& typeGraph,
     FuncGen::DefineTreeBuilderInstructions(code,
                                            typeToHash,
                                            calculateExclusiveSize(rootType),
-                                           enumerateTypeNames(rootType));
+                                           enumerateTypeNames(rootType),
+                                           rootTypeAlias);
   }
 
   if (auto* n = std::get_if<ExactName>(&rootName))
-    FuncGen::DefineTopLevelIntrospectNamed(code, typeToHash, n->name);
+    FuncGen::DefineTopLevelIntrospectNamed(
+        code, typeToHash, n->name, rootTypeAlias);
 
   if (VLOG_IS_ON(3)) {
     VLOG(3) << "Generated trace code:\n";
@@ -1716,7 +1753,8 @@ size_t countRealTemplateParams(const Container& cont) {
   size_t n = (kind == "map" || kind == "pair") ? 2 : 1;
   while (n < cont.templateParams.size() && cont.templateParams[n].value)
     n++;
-  if (auto idx = cont.containerInfo_.underlyingContainerIndex; idx && *idx + 1 > n)
+  if (auto idx = cont.containerInfo_.underlyingContainerIndex;
+      idx && *idx + 1 > n)
     n = *idx + 1;
   return n;
 }
@@ -1874,8 +1912,7 @@ std::string resolveTypeName(Type& t) {
       Type& extra = cont->templateParams[i].type();
       size_t stubbedSize;
       std::string_view stubbedName;
-      bool isAllocatorRole =
-          cont->containerInfo_.allocatorIndex == i;
+      bool isAllocatorRole = cont->containerInfo_.allocatorIndex == i;
       if (auto* dummy = dynamic_cast<Dummy*>(&extra)) {
         stubbedSize = dummy->size();
         stubbedName = dummy->inputName();
@@ -1899,9 +1936,8 @@ std::string resolveTypeName(Type& t) {
             " cannot be reconstructed here with a custom, stateful "
             "hasher/comparator/allocator");
       }
-      if (!isAllocatorRole && stubbedName != "less" &&
-          stubbedName != "hash" && stubbedName != "equal_to" &&
-          stubbedName != "allocator") {
+      if (!isAllocatorRole && stubbedName != "less" && stubbedName != "hash" &&
+          stubbedName != "equal_to" && stubbedName != "allocator") {
         throw std::runtime_error(
             "CodeGen::resolveTypeName: " + cont->containerInfo_.typeName +
             "'s template parameter " + std::to_string(i) + " (`" +
@@ -2277,13 +2313,15 @@ void CodeGen::generateReconstructClassPreamble(TypeGraph& typeGraph,
 // wire shape - a right-nested chain of types::st::Pair<leaf, ...> - but
 // built from the runtime types::dy:: descriptors instead, since this code
 // has to decode a shape it didn't just statically encode. Assumes
-// OIInternal::__ROOT_TYPE__ already exists in `code` - either from this
-// same call's own generateReconstructClassPreamble (standalone reconstruct)
-// or from generate()'s equivalent redeclaration for the same root (the
-// combined case).
+// OIInternal::<rootTypeAlias> already exists in `code` - either from this
+// same call's own generateReconstructClassPreamble (standalone reconstruct,
+// always "__ROOT_TYPE__") or from generateIntrospectRoot()'s equivalent
+// redeclaration for the same root (the combined case, whatever
+// "__ROOT_TYPE__<N>" alias that particular root was assigned).
 void CodeGen::generateReconstructClassBody(TypeGraph& typeGraph,
                                            Class& cls,
                                            const std::string& typeToHash,
+                                           const std::string& rootTypeAlias,
                                            std::string& code) {
   std::vector<ReconstructableMember> members =
       collectReconstructableMembers(cls);
@@ -2340,7 +2378,7 @@ void CodeGen::generateReconstructClassBody(TypeGraph& typeGraph,
   }
   const std::string shapeVar = (n == 1) ? "leaf_0" : "pair_0";
 
-  mainFnCode += "extern \"C\" OIInternal::__ROOT_TYPE__ " + typeToHash +
+  mainFnCode += "extern \"C\" OIInternal::" + rootTypeAlias + " " + typeToHash +
                 "(std::span<const uint8_t> bytes) {\n";
   emitAliasRegistries(typeGraph, mainFnCode);
   mainFnCode += "  std::vector<uint8_t> vec(bytes.begin(), bytes.end());\n";
@@ -3428,12 +3466,15 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
             ".val);\n";
 
     std::string firstCode, secondCode;
-    std::string firstExpr = emitReconstructValue(
-        cont->templateParams[0].type(), v + "_pair.first()", idCounter,
-        firstCode);
-    std::string secondExpr = emitReconstructValue(
-        cont->templateParams[1].type(), v + "_pair.second()", idCounter,
-        secondCode);
+    std::string firstExpr = emitReconstructValue(cont->templateParams[0].type(),
+                                                 v + "_pair.first()",
+                                                 idCounter,
+                                                 firstCode);
+    std::string secondExpr =
+        emitReconstructValue(cont->templateParams[1].type(),
+                             v + "_pair.second()",
+                             idCounter,
+                             secondCode);
     code += firstCode;
     code += secondCode;
     code += "  auto first = " + firstExpr + ";\n";
@@ -3446,15 +3487,15 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     // optional_type.toml), so lastVal is the bare Sum<Unit, T0> ParsedData
     // directly, with no leading VarInt to drain first, and no aliasing/
     // cycle concerns whatsoever.
-    code += "  auto " + v +
-            "_sum = std::get<oi::exporters::ParsedData::Sum>(" + lastVal +
-            ".val);\n";
+    code += "  auto " + v + "_sum = std::get<oi::exporters::ParsedData::Sum>(" +
+            lastVal + ".val);\n";
     code += "  bool present = " + v + "_sum.index == 1;\n";
 
     std::string valueCode;
-    std::string valueExpr = emitReconstructValue(
-        cont->templateParams[0].type(), v + "_sum.value()", idCounter,
-        valueCode);
+    std::string valueExpr = emitReconstructValue(cont->templateParams[0].type(),
+                                                 v + "_sum.value()",
+                                                 idCounter,
+                                                 valueCode);
     code += "  auto valueVal = [&]() {\n";
     code += valueCode;
     code += "    return " + valueExpr + ";\n";
@@ -3491,9 +3532,8 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     for (size_t i = 0; i < countRealTemplateParams(*cont); i++) {
       const auto& param = cont->templateParams[i];
       if (param.value) {
-        code += "    static constexpr " + resolveTypeName(param.type()) +
-                " N" + std::to_string(valueIdx++) + " = " + *param.value +
-                ";\n";
+        code += "    static constexpr " + resolveTypeName(param.type()) + " N" +
+                std::to_string(valueIdx++) + " = " + *param.value + ";\n";
       } else {
         code += "    using T" + std::to_string(typeIdx++) + " = " +
                 resolveTypeName(param.type()) + ";\n";
@@ -3602,8 +3642,8 @@ void CodeGen::generateReconstructContainerBody(TypeGraph& typeGraph,
       const auto& param = container.templateParams[i];
       if (param.value) {
         mainFnCode += "  static constexpr " + resolveTypeName(param.type()) +
-                      " N" + std::to_string(valueIdx++) + " = " +
-                      *param.value + ";\n";
+                      " N" + std::to_string(valueIdx++) + " = " + *param.value +
+                      ";\n";
       } else {
         mainFnCode += "  using T" + std::to_string(typeIdx++) + " = " +
                       resolveTypeName(param.type()) + ";\n";
@@ -3756,7 +3796,8 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
     generateReconstructScalar(*primitive, typeToHash, code);
   } else if (cls) {
     generateReconstructClassPreamble(typeGraph, *cls, code);
-    generateReconstructClassBody(typeGraph, *cls, typeToHash, code);
+    generateReconstructClassBody(
+        typeGraph, *cls, typeToHash, "__ROOT_TYPE__", code);
   } else {
     generateReconstructContainerBody(typeGraph, *container, typeToHash, code);
   }
@@ -3770,17 +3811,21 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
 // The combined introspect+reconstruct case (same root T, one oilgen
 // invocation - see docs/object-capture-initial-thoughts.md and
 // OIGenerator::generate()'s same-type check): appends reconstructImpl<T>'s
-// function body to `code` that generate() already populated for
-// introspectImpl<T>, reusing generate()'s OIInternal::__ROOT_TYPE__
-// redeclaration instead of emitting a second, colliding copy of it. Unlike
+// function body to `code` that generateIntrospectRoot() already populated
+// for introspectImpl<T>, reusing that call's OIInternal::__ROOT_TYPE__<N>
+// redeclaration (N = introspectRootIndex, the same index that call used)
+// instead of emitting a second, colliding copy of it. Unlike
 // generateReconstruct(), this never clears `code` and never emits the
-// includes/glibc-compat preamble - generate() already did both, and this
-// is only ever called immediately after it for the same TypeGraph.
+// includes/glibc-compat preamble - generateIntrospectRoot() already did
+// both, and this is only ever called immediately after it for the same
+// TypeGraph.
 void CodeGen::appendReconstructFunctionBody(TypeGraph& typeGraph,
                                             std::string& code,
-                                            RootFunctionName rootName) {
-  assert(typeGraph.rootTypes().size() == 1);
-  Type& rootType = typeGraph.rootTypes()[0];
+                                            RootFunctionName rootName,
+                                            size_t introspectRootIndex) {
+  Type& rootType = typeGraph.rootTypes()[introspectRootIndex];
+  std::string rootTypeAlias =
+      "__ROOT_TYPE__" + std::to_string(introspectRootIndex);
 
   auto* primitive = dynamic_cast<Primitive*>(&rootType);
   auto* cls = dynamic_cast<Class*>(&rootType);
@@ -3808,7 +3853,8 @@ void CodeGen::appendReconstructFunctionBody(TypeGraph& typeGraph,
   if (primitive) {
     generateReconstructScalar(*primitive, typeToHash, code);
   } else if (cls) {
-    generateReconstructClassBody(typeGraph, *cls, typeToHash, code);
+    generateReconstructClassBody(
+        typeGraph, *cls, typeToHash, rootTypeAlias, code);
   } else {
     generateReconstructContainerBody(typeGraph, *container, typeToHash, code);
   }
