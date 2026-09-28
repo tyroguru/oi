@@ -38,6 +38,19 @@ if (container.has_value()) {
 }
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# new "optional" calling convention: present/absent + value, no captured
+# address at all (unlike "pointer"-kind's unique_ptr/shared_ptr).
+reconstruct_kind = "optional"
+reconstruct = """
+if (present) {
+  return %1%<T0>(valueVal());
+}
+return %1%<T0>();
+"""
+
 [[codegen.processor]]
 type = "types::st::Sum<DB, types::st::Unit<DB>, typename TypeHandler<Ctx, T0>::type>"
 func = """

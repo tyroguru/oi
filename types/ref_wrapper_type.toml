@@ -42,6 +42,39 @@ if (ctx.pointers.add((uintptr_t)&container.get())) {
 }
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "pointer" calling convention, already proven on std::unique_ptr. Same
+# wire shape (address + present/absent), and the same "no aliasing/cycle
+# support yet" limitation as std::unique_ptr - but for a different reason:
+# std::unique_ptr's captured address can never *legitimately* reappear
+# (sole ownership), so a repeat there always means a genuine reference
+# cycle. std::reference_wrapper carries no ownership at all, so two
+# separate reference_wrappers (or a reference_wrapper and a raw pointer)
+# legitimately aliasing the same object is completely valid C++ and not a
+# cycle - OIL just doesn't support reconstructing that aliasing yet either
+# (see emitReconstructValue's own comment on the shared error message this
+# hits, which names both possibilities rather than guessing). Unlike
+# unique_ptr, `present` is never legitimately false here (a C++ reference
+# is never null), so the only way to reach the `else` below at all is that
+# unsupported-aliasing case - defensively guarded rather than assumed
+# unreachable, since asserting it would be far less clear than saying so
+# directly. new T0(...) deliberately never freed - see
+# emitReconstructPointerValue's own doc for why that's a documented choice,
+# not an oversight, for a container with no destruction machinery of its
+# own to hook into.
+reconstruct_kind = "pointer"
+reconstruct = """
+if (present) {
+  return %1%<T0>(*(new T0(pointeeVal())));
+}
+throw std::runtime_error(
+    "oi::reconstruct: std::reference_wrapper - captured with a null/zero "
+    "address, which should never happen for a genuine C++ reference - not "
+    "yet supported");
+"""
+
 [[codegen.processor]]
 type = "types::st::VarInt<DB>"
 func = """

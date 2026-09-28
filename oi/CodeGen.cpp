@@ -1641,7 +1641,8 @@ Type& resolvePointeeForReconstruct(Type& pointeeType) {
 //    over anything that was meant to stay unnamed in between - a future
 //    container that violates that assumption would need this revisited.)
 size_t countRealTemplateParams(const Container& cont) {
-  size_t n = cont.containerInfo_.codegen.reconstructKind == "map" ? 2 : 1;
+  const auto& kind = cont.containerInfo_.codegen.reconstructKind;
+  size_t n = (kind == "map" || kind == "pair") ? 2 : 1;
   while (n < cont.templateParams.size() && cont.templateParams[n].value)
     n++;
   if (auto idx = cont.containerInfo_.underlyingContainerIndex; idx && *idx + 1 > n)
@@ -3062,25 +3063,30 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
   if (info.codegen.reconstructKind != "list" &&
       info.codegen.reconstructKind != "bytes" &&
       info.codegen.reconstructKind != "map" &&
+      info.codegen.reconstructKind != "pair" &&
+      info.codegen.reconstructKind != "optional" &&
       info.codegen.reconstructKind != "pointer") {
     throw std::runtime_error(
         "CodeGen::emitReconstructValue: " + info.typeName +
         " has `codegen.reconstruct` but an unrecognized or missing "
         "`codegen.reconstruct_kind` ('" +
         info.codegen.reconstructKind +
-        "') - expected \"list\", \"bytes\", \"map\", or \"pointer\"");
+        "') - expected \"list\", \"bytes\", \"map\", \"pair\", "
+        "\"optional\", or \"pointer\"");
   }
   if (cont->templateParams.empty()) {
     throw std::runtime_error(
         "CodeGen::emitReconstructValue: " + info.typeName +
         " has no template parameters to reconstruct an element type from");
   }
-  if (info.codegen.reconstructKind == "map" &&
+  if ((info.codegen.reconstructKind == "map" ||
+       info.codegen.reconstructKind == "pair") &&
       cont->templateParams.size() < 2) {
     throw std::runtime_error(
-        "CodeGen::emitReconstructValue: " + info.typeName +
-        " is \"map\"-kind but has fewer than 2 template parameters to "
-        "reconstruct a key and a value type from");
+        "CodeGen::emitReconstructValue: " + info.typeName + " is \"" +
+        info.codegen.reconstructKind +
+        "\"-kind but has fewer than 2 template parameters to reconstruct "
+        "two element types from");
   }
 
   const auto& processors = info.codegen.processors;
@@ -3248,18 +3254,30 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
       code += "    return __oi_it->second;\n";
       code += "  };\n";
     } else {
-      // Reached only for a genuinely non-cycle-capable std::unique_ptr
-      // now - emitReconstructContainerCyclicPointerValue above already
-      // handled (and returned true for) any cycle-capable pointee, giving
-      // it the same address->raw-pointer registry raw pointers/references
-      // use. This container kind still has no registry of its own for the
-      // ordinary case, so a repeated non-null address here can only mean
-      // something has gone wrong - always an error.
+      // Reached only for a genuinely non-cycle-capable std::unique_ptr or
+      // std::reference_wrapper now - emitReconstructContainerCyclicPointerValue
+      // above already handled (and returned true for) any cycle-capable
+      // pointee, giving it the same address->raw-pointer registry raw
+      // pointers/references use. This container kind still has no registry
+      // of its own for the ordinary case, so a repeated non-null address
+      // here always means one of two things, depending on which container
+      // this is: for std::unique_ptr, sole ownership means its captured
+      // address can never legitimately reappear elsewhere, so a repeat can
+      // only be a reference cycle this branch doesn't support (see
+      // uniq_ptr_type.toml). For std::reference_wrapper, by contrast, this
+      // is the *expected*, legitimate way to reach a repeat: two separate
+      // reference_wrappers (or a reference_wrapper and a raw pointer/
+      // reference) aliasing the same object is completely valid C++, not a
+      // cycle at all - OIL just doesn't support reconstructing that aliasing
+      // yet (see ref_wrapper_type.toml). Either way, the message below names
+      // both possibilities rather than guessing which applies, since this
+      // code is shared and can't tell them apart.
       code += "  if (!present && " + v + "_addr != 0) {\n";
       code +=
           "    throw std::runtime_error(\"oi::reconstruct: " + info.typeName +
-          " - a cycle detected (a captured pointer address was "
-          "reused) - not yet supported\");\n";
+          " - a captured pointer address was reused (either a reference "
+          "cycle, or two references legitimately aliasing the same "
+          "object) - neither is supported here yet\");\n";
       code += "  }\n";
     }
 
@@ -3313,6 +3331,47 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     code += keyCode;
     code += valueCode;
     code += "    return std::make_pair(" + keyExpr + ", " + valueExpr + ");\n";
+    code += "  };\n";
+  } else if (info.codegen.reconstructKind == "pair") {
+    // std::pair's own content processor is a bare Pair<T0, T1> (see
+    // pair_type.toml) - no length prefix and no wrapping List, unlike
+    // "map"-kind's List<Pair<K,V>>: there's always exactly one of each,
+    // never a variable number of entries.
+    code += "  auto " + v +
+            "_pair = std::get<oi::exporters::ParsedData::Pair>(" + lastVal +
+            ".val);\n";
+
+    std::string firstCode, secondCode;
+    std::string firstExpr = emitReconstructValue(
+        cont->templateParams[0].type(), v + "_pair.first()", idCounter,
+        firstCode);
+    std::string secondExpr = emitReconstructValue(
+        cont->templateParams[1].type(), v + "_pair.second()", idCounter,
+        secondCode);
+    code += firstCode;
+    code += secondCode;
+    code += "  auto first = " + firstExpr + ";\n";
+    code += "  auto second = " + secondExpr + ";\n";
+  } else if (info.codegen.reconstructKind == "optional") {
+    // A single, possibly-absent *value* (std::optional, folly::Optional) -
+    // unlike "pointer"-kind's std::unique_ptr/std::shared_ptr, there's no
+    // captured address at all (an optional's contained value was never
+    // separately heap-allocated with its own identity - see
+    // optional_type.toml), so lastVal is the bare Sum<Unit, T0> ParsedData
+    // directly, with no leading VarInt to drain first, and no aliasing/
+    // cycle concerns whatsoever.
+    code += "  auto " + v +
+            "_sum = std::get<oi::exporters::ParsedData::Sum>(" + lastVal +
+            ".val);\n";
+    code += "  bool present = " + v + "_sum.index == 1;\n";
+
+    std::string valueCode;
+    std::string valueExpr = emitReconstructValue(
+        cont->templateParams[0].type(), v + "_sum.value()", idCounter,
+        valueCode);
+    code += "  auto valueVal = [&]() {\n";
+    code += valueCode;
+    code += "    return " + valueExpr + ";\n";
     code += "  };\n";
   } else {
     // "bytes": the whole reconstructable content is one contiguous
