@@ -1751,27 +1751,51 @@ std::string resolveTypeName(Type& t) {
     name += ">";
 
     // Everything from `realParams` onward is omitted above - but only
-    // safely so if it's either left untouched or an *empty/stateless*
-    // stub. Empty-base-optimisation makes substituting the container's own
-    // default layout-identical either way, and this container's contract
-    // (bucket order, comparator identity, etc) is never observable through
-    // its own public interface, so the substitution is behaviourally
-    // transparent too. A *stateful* stub (a genuine custom hasher/
-    // comparator/allocator carrying its own data) has no default that
-    // could reproduce it, and this container was never actually the type
-    // its own default template argument describes - so refuse outright
-    // here, at codegen time, rather than silently reconstruct something
-    // else.
+    // safely so if it's either left untouched, or a stub OIL can prove is
+    // behaviourally interchangeable with the container's own default.
+    // Empty-base-optimisation makes an empty/stateless stub
+    // layout-identical to the default either way, but *layout*-identical
+    // isn't the same as *behaviourally*-identical: an Allocator's identity
+    // is never observable (any stateless allocator is interchangeable by
+    // the Allocator concept's own requirements - a genuine language
+    // guarantee, not an assumption), and a hash table's Hash similarly
+    // never affects anything but internal bucket layout, which its own
+    // contract leaves unspecified - but a Compare (an ordered container's
+    // iteration order *is* part of its contract) or a KeyEqual (defines
+    // which keys collapse together - substituting a different one during
+    // re-insertion could silently drop entries the original never would
+    // have) both define genuinely observable behaviour, and OIL cannot
+    // verify a stub's real identity beyond its bare name (everything else
+    // about it was discarded when it was stubbed - see
+    // TypeIdentifier::visit(Container&)). So: an Allocator-role stub (per
+    // this container's own `allocatorIndex`, or already identified as one
+    // via DummyAllocator) is accepted whenever it's empty, regardless of
+    // its name. Anything else is accepted only when it's *both* empty and
+    // its bare name is exactly one of this codebase's own recognized
+    // library defaults ("less", "hash", "equal_to", or "allocator", for a
+    // container that doesn't separately declare `allocatorIndex`, e.g.
+    // folly::sorted_vector_set) - i.e. it provably *is* the container's own
+    // default in every case that matters (a real std::less/std::hash/
+    // std::equal_to reaching this point at all already means it wasn't
+    // intercepted by ClangTypeParser's `pass_through` list, which only
+    // happens when the source used that exact standard type, not some
+    // other, differently-named one). A stateful stub, or an empty one with
+    // any other name, is refused outright, at codegen time, rather than
+    // silently reconstructing a value with different observable behaviour
+    // than the original.
     for (size_t i = realParams; i < cont->templateParams.size(); i++) {
       Type& extra = cont->templateParams[i].type();
       size_t stubbedSize;
       std::string_view stubbedName;
+      bool isAllocatorRole =
+          cont->containerInfo_.allocatorIndex == i;
       if (auto* dummy = dynamic_cast<Dummy*>(&extra)) {
         stubbedSize = dummy->size();
         stubbedName = dummy->inputName();
       } else if (auto* dummyAlloc = dynamic_cast<DummyAllocator*>(&extra)) {
         stubbedSize = dummyAlloc->size();
         stubbedName = dummyAlloc->inputName();
+        isAllocatorRole = true;
       } else {
         continue;
       }
@@ -1787,6 +1811,23 @@ std::string resolveTypeName(Type& t) {
             cont->containerInfo_.typeName +
             " cannot be reconstructed here with a custom, stateful "
             "hasher/comparator/allocator");
+      }
+      if (!isAllocatorRole && stubbedName != "less" &&
+          stubbedName != "hash" && stubbedName != "equal_to" &&
+          stubbedName != "allocator") {
+        throw std::runtime_error(
+            "CodeGen::resolveTypeName: " + cont->containerInfo_.typeName +
+            "'s template parameter " + std::to_string(i) + " (`" +
+            std::string(stubbedName) +
+            "`) defines ordering or key-equivalence behaviour that OIL "
+            "cannot verify matches this container's own default - "
+            "reconstructing with the default substituted in its place "
+            "could silently change observable behaviour (iteration order, "
+            "or which keys are treated as equivalent), even though it's "
+            "empty/stateless, so " +
+            cont->containerInfo_.typeName +
+            " cannot be reconstructed here with a comparator/key-equal "
+            "other than this codebase's own recognized library defaults");
       }
     }
     return name;
