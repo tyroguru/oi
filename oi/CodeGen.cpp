@@ -1615,6 +1615,25 @@ Type& resolvePointeeForReconstruct(Type& pointeeType) {
   return pointeeType;
 }
 
+// How many of a container's *leading* template parameters are "real" - part
+// of its logical value, and therefore always named/declared for
+// reconstruction - rather than an "extra", behavior-configuring detail that
+// can be left for the container's own default template argument to supply
+// (see resolveTypeName's own comment on its Container case for why that's
+// usually safe). The base count is fixed by reconstruct_kind: exactly 2 for
+// a "map" (key and value), 1 for everything else (a single element/
+// pointee). That base is then extended through any run of non-type
+// ("value") template parameters immediately following it - e.g.
+// std::array's size N, right after its element type - since a value
+// parameter with no default (unlike Compare/Allocator/Hash/KeyEqual, which
+// always have one) can never be safely omitted, regardless of position.
+size_t countRealTemplateParams(const Container& cont) {
+  size_t n = cont.containerInfo_.codegen.reconstructKind == "map" ? 2 : 1;
+  while (n < cont.templateParams.size() && cont.templateParams[n].value)
+    n++;
+  return n;
+}
+
 // Recursively names the concrete C++ type reconstruction should produce
 // for `t` - a Primitive's own name, or a reconstructable Container
 // parameterized by its own element type's name in turn (e.g.
@@ -1677,19 +1696,15 @@ std::string resolveTypeName(Type& t) {
           "CodeGen::resolveTypeName: " + cont->containerInfo_.typeName +
           " has no template parameters");
 
-    // Exactly how many *leading* template parameters are "real" (part of
-    // this container's logical value, rather than an implementation detail)
-    // is fixed by its reconstruction kind, not by how many of them happen
-    // to still be nameable: a "map" has two (key and value); every other
-    // kind ("list"/"bytes"/"pointer") has exactly one (element/pointee).
-    // Everything after that - Compare/Allocator for an ordered container,
-    // GrowthPolicy/Container for folly::sorted_vector_set, Hash/KeyEqual/
-    // Allocator for a hash table, etc - is never named here, regardless of
-    // whether it's independently still a real, nameable type (e.g.
-    // std::multimap's Allocator, left untouched by
-    // ClangTypeParser's `pass_through` list) or an introspection-only
-    // placeholder OIL substituted in its place (see
-    // TypeIdentifier::visit(Container&) and
+    // See countRealTemplateParams's own comment for exactly how many
+    // leading parameters this counts as "real" and why. Everything after
+    // that - Compare/Allocator for an ordered container, GrowthPolicy/
+    // Container for folly::sorted_vector_set, Hash/KeyEqual/Allocator for a
+    // hash table, etc - is never named here, regardless of whether it's
+    // independently still a real, nameable type (e.g. std::multimap's
+    // Allocator, left untouched by ClangTypeParser's `pass_through` list)
+    // or an introspection-only placeholder OIL substituted in its place
+    // (see TypeIdentifier::visit(Container&) and
     // std_unordered_map_type.toml's own comment on the hasher/key-equal) -
     // reconstruction relies on the container's own default template
     // argument to supply it either way, exactly as e.g. set_type.toml's
@@ -1698,18 +1713,26 @@ std::string resolveTypeName(Type& t) {
     // get this wrong: std::multimap's own Compare/Allocator are never
     // stubbed, so that would keep naming past the real key/value pair and
     // produce an invalid 4-argument reconstruct-lambda return type.)
-    const size_t realParams =
-        cont->containerInfo_.codegen.reconstructKind == "map" ? 2 : 1;
+    const size_t realParams = countRealTemplateParams(*cont);
     if (cont->templateParams.size() < realParams)
       throw std::runtime_error(
           "CodeGen::resolveTypeName: " + cont->containerInfo_.typeName +
           " has fewer template parameters than its own reconstruct_kind ('" +
           cont->containerInfo_.codegen.reconstructKind + "') requires");
 
-    std::string name = cont->containerInfo_.typeName + "<" +
-                       resolveTypeName(cont->templateParams[0].type());
-    if (realParams >= 2)
-      name += ", " + resolveTypeName(cont->templateParams[1].type());
+    // A real parameter is named by recursing for an ordinary type (e.g. a
+    // map's value type), or by writing its literal value directly for a
+    // non-type parameter (e.g. std::array's size N) - NameGen's own
+    // Container-naming does the same thing, for the same reason: a
+    // non-type parameter's *type* (e.g. "unsigned long") is a different,
+    // useless thing to name here from its *value* (e.g. "4").
+    std::string name = cont->containerInfo_.typeName + "<";
+    for (size_t i = 0; i < realParams; i++) {
+      if (i > 0)
+        name += ", ";
+      const auto& param = cont->templateParams[i];
+      name += param.value ? *param.value : resolveTypeName(param.type());
+    }
     name += ">";
 
     // Everything from `realParams` onward is omitted above - but only
@@ -3246,28 +3269,34 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
   }
 
   if (!skipGenericReconstructText) {
-    // T0 (and T1, for a "map"-kind container) must mean *this* container's
-    // own template parameters inside its own reconstruct body - shadowing
-    // whatever an enclosing level (if any) already declared. Without this,
-    // a nested container's reconstruct body (e.g. a vector<string>'s
-    // element string) would incorrectly see the outermost container's T0
-    // instead of its own, since bare `T0`/`T1` are otherwise just
-    // unqualified names looked up in the enclosing scope.
-    code +=
-        "    using T0 = " + resolveTypeName(cont->templateParams[0].type()) +
-        ";\n";
-    // T1 is declared only for a "map"-kind container's own reconstruct text
-    // (the only kind that ever references it) - gating on
-    // templateParams.size() >= 2 instead would be wrong here: a "list"-kind
-    // container with only one *real* parameter (e.g. std::unordered_set's
-    // Key) still has several more templateParams beyond it (Hash/KeyEqual/
-    // Allocator), and templateParams[1] there may be an introspection-only
-    // placeholder resolveTypeName can only name as part of the whole
-    // container (see its own comment) - not nameable stood alone.
-    if (info.codegen.reconstructKind == "map") {
-      code +=
-          "    using T1 = " + resolveTypeName(cont->templateParams[1].type()) +
-          ";\n";
+    // T0/T1/N0/etc must mean *this* container's own "real" template
+    // parameters (see countRealTemplateParams) inside its own reconstruct
+    // body - shadowing whatever an enclosing level (if any) already
+    // declared. Without this, a nested container's reconstruct body (e.g.
+    // a vector<string>'s element string) would incorrectly see the
+    // outermost container's T0 instead of its own, since bare `T0`/`T1`/
+    // `N0` are otherwise just unqualified names looked up in the enclosing
+    // scope. Numbered independently per kind (T<i> for a type parameter,
+    // N<i> for a non-type one, e.g. std::array's size), exactly matching
+    // genContainerTypeHandler's own convention - only ever as many as
+    // countRealTemplateParams says are real: a "list"-kind container with
+    // only one real parameter (e.g. std::unordered_set's Key) still has
+    // several more templateParams beyond it (Hash/KeyEqual/Allocator), and
+    // templateParams[1] there may be an introspection-only placeholder
+    // resolveTypeName can only name as part of the whole container (see
+    // its own comment) - not nameable stood alone, and never referenced by
+    // this container's own reconstruct text anyway.
+    size_t typeIdx = 0, valueIdx = 0;
+    for (size_t i = 0; i < countRealTemplateParams(*cont); i++) {
+      const auto& param = cont->templateParams[i];
+      if (param.value) {
+        code += "    static constexpr " + resolveTypeName(param.type()) +
+                " N" + std::to_string(valueIdx++) + " = " + *param.value +
+                ";\n";
+      } else {
+        code += "    using T" + std::to_string(typeIdx++) + " = " +
+                resolveTypeName(param.type()) + ";\n";
+      }
     }
     code += (boost::format(info.codegen.reconstruct) % info.typeName).str();
     code += "\n";
@@ -3289,8 +3318,6 @@ void CodeGen::generateReconstructContainerBody(TypeGraph& typeGraph,
   }
 
   const std::string containerType = resolveTypeName(container);
-  const std::string t0Name =
-      resolveTypeName(container.templateParams[0].type());
 
   // The container's full wire shape, exactly as genContainerTypeHandler
   // builds it for the write side (see CodeGen.cpp above) - a right-nested
@@ -3359,23 +3386,28 @@ void CodeGen::generateReconstructContainerBody(TypeGraph& typeGraph,
   mainFnCode += "extern \"C\" " + containerType + " " + typeToHash +
                 "(std::span<const uint8_t> bytes) {\n";
   emitAliasRegistries(typeGraph, mainFnCode);
-  // T0 (and T1, for a map) is the outermost container's own template
-  // parameter(s) - needed as bare names for its processor type strings
-  // (e.g. seq_type.toml's `typename TypeHandler<Ctx, T0>::type`, or
-  // std_map_type.toml's ...<Ctx, T0>/...<Ctx, T1>) to resolve; a nested
+  // T0/T1/N0/etc (see emitReconstructValue's matching comment for the
+  // full naming/numbering convention and why templateParams[1] isn't
+  // always safe to name standalone) are the outermost container's own
+  // "real" template parameter(s) - needed as bare names for its processor
+  // type strings (e.g. seq_type.toml's `typename TypeHandler<Ctx, T0>::type`,
+  // or std_map_type.toml's ...<Ctx, T0>/...<Ctx, T1>) to resolve; a nested
   // element's own T0/T1 (if it's itself a container) is handled the same
   // way, but as a local inside emitReconstructValue's own lambda scope,
   // not here.
-  mainFnCode += "  using T0 = " + t0Name + ";\n";
-  // See emitReconstructValue's matching comment - T1 is only ever
-  // referenced by a "map"-kind container's own reconstruct text, and
-  // templateParams[1] isn't safe to name standalone for every other kind
-  // (it may be an introspection-only placeholder for e.g.
-  // std::unordered_set's Hash).
-  if (container.containerInfo_.codegen.reconstructKind == "map") {
-    mainFnCode +=
-        "  using T1 = " + resolveTypeName(container.templateParams[1].type()) +
-        ";\n";
+  {
+    size_t typeIdx = 0, valueIdx = 0;
+    for (size_t i = 0; i < countRealTemplateParams(container); i++) {
+      const auto& param = container.templateParams[i];
+      if (param.value) {
+        mainFnCode += "  static constexpr " + resolveTypeName(param.type()) +
+                      " N" + std::to_string(valueIdx++) + " = " +
+                      *param.value + ";\n";
+      } else {
+        mainFnCode += "  using T" + std::to_string(typeIdx++) + " = " +
+                      resolveTypeName(param.type()) + ";\n";
+      }
+    }
   }
   // A map-shaped container's content processor is conditioned on
   // captureKeys (see std_map_type.toml) - a member of that container's
