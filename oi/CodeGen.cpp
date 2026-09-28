@@ -1676,39 +1676,55 @@ std::string resolveTypeName(Type& t) {
       throw std::runtime_error(
           "CodeGen::resolveTypeName: " + cont->containerInfo_.typeName +
           " has no template parameters");
+
+    // Exactly how many *leading* template parameters are "real" (part of
+    // this container's logical value, rather than an implementation detail)
+    // is fixed by its reconstruction kind, not by how many of them happen
+    // to still be nameable: a "map" has two (key and value); every other
+    // kind ("list"/"bytes"/"pointer") has exactly one (element/pointee).
+    // Everything after that - Compare/Allocator for an ordered container,
+    // GrowthPolicy/Container for folly::sorted_vector_set, Hash/KeyEqual/
+    // Allocator for a hash table, etc - is never named here, regardless of
+    // whether it's independently still a real, nameable type (e.g.
+    // std::multimap's Allocator, left untouched by
+    // ClangTypeParser's `pass_through` list) or an introspection-only
+    // placeholder OIL substituted in its place (see
+    // TypeIdentifier::visit(Container&) and
+    // std_unordered_map_type.toml's own comment on the hasher/key-equal) -
+    // reconstruction relies on the container's own default template
+    // argument to supply it either way, exactly as e.g. set_type.toml's
+    // `reconstruct` text already does. (Naming every leading parameter that
+    // *happens* to still be real, stopping only at the first stub, would
+    // get this wrong: std::multimap's own Compare/Allocator are never
+    // stubbed, so that would keep naming past the real key/value pair and
+    // produce an invalid 4-argument reconstruct-lambda return type.)
+    const size_t realParams =
+        cont->containerInfo_.codegen.reconstructKind == "map" ? 2 : 1;
+    if (cont->templateParams.size() < realParams)
+      throw std::runtime_error(
+          "CodeGen::resolveTypeName: " + cont->containerInfo_.typeName +
+          " has fewer template parameters than its own reconstruct_kind ('" +
+          cont->containerInfo_.codegen.reconstructKind + "') requires");
+
     std::string name = cont->containerInfo_.typeName + "<" +
                        resolveTypeName(cont->templateParams[0].type());
-    // A second template parameter (e.g. a map's value type) is named too,
-    // when present - a single-param name like "std::map<K>" wouldn't even
-    // be a valid type.
-    if (cont->templateParams.size() >= 2)
+    if (realParams >= 2)
       name += ", " + resolveTypeName(cont->templateParams[1].type());
     name += ">";
 
-    // Any further ("extra", behavior-configuring) template parameters -
-    // Compare/Allocator for an ordered container, GrowthPolicy/Container
-    // for folly::sorted_vector_set, Hash/KeyEqual/Allocator for a hash
-    // table, etc - are deliberately never named above: reconstruction
-    // relies on the container's own default template argument to supply
-    // them, exactly as e.g. set_type.toml's `reconstruct` text already
-    // does. That's safe whenever the real parameter is left untouched
-    // (ClangTypeParser's `pass_through` list - std::less/std::allocator/etc
-    // - or simply wasn't stubbed at all), since it's then either identical
-    // to or interchangeable with the default. It stops being safe for a
-    // parameter OIL *has* replaced with an introspection-only placeholder
-    // (see TypeIdentifier::visit(Container&) and
-    // std_unordered_map_type.toml's own comment on the hasher/key-equal):
-    // if the real parameter it stands in for was empty/stateless (the
-    // overwhelming common case - e.g. plain std::hash<K>), the container's
-    // default is layout-identical (empty-base-optimised either way) and
-    // behaviourally equivalent (a hash table's contract never exposes
-    // bucket order), so substituting it is fine. If the real parameter was
-    // stateful (a genuine custom hasher/comparator/allocator carrying its
-    // own data), there is no default that could reproduce it, and this
-    // container was never actually the type its own default template
-    // argument describes - so refuse outright here, at codegen time,
-    // rather than silently reconstruct something else.
-    for (size_t i = 2; i < cont->templateParams.size(); i++) {
+    // Everything from `realParams` onward is omitted above - but only
+    // safely so if it's either left untouched or an *empty/stateless*
+    // stub. Empty-base-optimisation makes substituting the container's own
+    // default layout-identical either way, and this container's contract
+    // (bucket order, comparator identity, etc) is never observable through
+    // its own public interface, so the substitution is behaviourally
+    // transparent too. A *stateful* stub (a genuine custom hasher/
+    // comparator/allocator carrying its own data) has no default that
+    // could reproduce it, and this container was never actually the type
+    // its own default template argument describes - so refuse outright
+    // here, at codegen time, rather than silently reconstruct something
+    // else.
+    for (size_t i = realParams; i < cont->templateParams.size(); i++) {
       Type& extra = cont->templateParams[i].type();
       size_t stubbedSize;
       std::string_view stubbedName;
@@ -3240,7 +3256,15 @@ std::string CodeGen::emitReconstructValue(Type& elemType,
     code +=
         "    using T0 = " + resolveTypeName(cont->templateParams[0].type()) +
         ";\n";
-    if (cont->templateParams.size() >= 2) {
+    // T1 is declared only for a "map"-kind container's own reconstruct text
+    // (the only kind that ever references it) - gating on
+    // templateParams.size() >= 2 instead would be wrong here: a "list"-kind
+    // container with only one *real* parameter (e.g. std::unordered_set's
+    // Key) still has several more templateParams beyond it (Hash/KeyEqual/
+    // Allocator), and templateParams[1] there may be an introspection-only
+    // placeholder resolveTypeName can only name as part of the whole
+    // container (see its own comment) - not nameable stood alone.
+    if (info.codegen.reconstructKind == "map") {
       code +=
           "    using T1 = " + resolveTypeName(cont->templateParams[1].type()) +
           ";\n";
@@ -3343,7 +3367,12 @@ void CodeGen::generateReconstructContainerBody(TypeGraph& typeGraph,
   // way, but as a local inside emitReconstructValue's own lambda scope,
   // not here.
   mainFnCode += "  using T0 = " + t0Name + ";\n";
-  if (container.templateParams.size() >= 2) {
+  // See emitReconstructValue's matching comment - T1 is only ever
+  // referenced by a "map"-kind container's own reconstruct text, and
+  // templateParams[1] isn't safe to name standalone for every other kind
+  // (it may be an introspection-only placeholder for e.g.
+  // std::unordered_set's Hash).
+  if (container.containerInfo_.codegen.reconstructKind == "map") {
     mainFnCode +=
         "  using T1 = " + resolveTypeName(container.templateParams[1].type()) +
         ";\n";
