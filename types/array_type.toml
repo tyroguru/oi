@@ -47,6 +47,26 @@ traversal_func = """
     return tail.finish();
 """
 
+# Research groundwork for byte-accurate object capture/reconstruction (see
+# docs/object-capture-initial-thoughts.md, not part of this repo) - see
+# ContainerInfo.h's `reconstruct`/`reconstruct_kind` field docs for the
+# "list" calling convention. Unlike every other "list"-kind container
+# tried so far, std::array's size N is a mandatory, non-type second
+# template parameter (not a defaultable type param) - CodeGen.cpp's
+# resolveTypeName/countRealTemplateParams now name it directly (as `N0`)
+# rather than trying to omit it, and declare a real `N0` local alias for
+# this reconstruct text to reference, the same way `T0` already is. The
+# wire's own runtime-written length always equals the compile-time N, so
+# indexing with the loop counter is equivalent to using N0 directly.
+reconstruct_kind = "list"
+reconstruct = """
+%1%<T0, N0> result;
+for (size_t i = 0; i < length; i++) {
+  result[i] = nextElement();
+}
+return result;
+"""
+
 [[codegen.processor]]
 type = "types::st::List<DB, types::st::Pair<DB, types::st::VarInt<DB>, types::st::VarInt<DB>>>"
 func = """
