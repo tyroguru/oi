@@ -1736,11 +1736,15 @@ Type& unwrapTypedefs(Type& t) {
 // needs to preserve - the pointee is, and was always, the real type, just
 // reached via an edge that might close a reference cycle (see
 // emitReconstructPointerValue, which is what actually decides how to
-// handle that possibility).
+// handle that possibility). Also looks through Typedefs: in C's
+// `typedef struct foo_s foo_t; ... foo_t *first;` idiom the pointee is the
+// Typedef, and callers' cycle-capable checks need the Class beneath it (an
+// ordinary first edge to a cycle-capable Class must register its object
+// before decoding its fields, or a cycle back onto it can't be resolved).
 Type& resolvePointeeForReconstruct(Type& pointeeType) {
   if (auto* cb = dynamic_cast<CycleBreaker*>(&pointeeType))
-    return cb->underlyingType();
-  return pointeeType;
+    return unwrapTypedefs(cb->underlyingType());
+  return unwrapTypedefs(pointeeType);
 }
 
 // How many of a container's *leading* template parameters are "real" - part
