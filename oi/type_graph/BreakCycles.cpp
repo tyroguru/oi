@@ -69,11 +69,33 @@ Type& BreakCycles::mutate(Type& type) {
   return mutated;
 }
 
+Type* BreakCycles::onPathTarget(Type& type) const {
+  // Look through Typedefs: in C's `typedef struct foo_s foo_t;` idiom a
+  // self-referential member is `foo_t* next`, so the edge's immediate pointee
+  // is the Typedef, not the Class that's on the path. Wrap the underlying
+  // Class, exactly as if the member had been declared `struct foo_s* next`.
+  Type* t = &type;
+  while (true) {
+    NodeId id = t->id();
+    if (id >= 0 && onPath_.contains(id)) {
+      break;
+    }
+    auto* td = dynamic_cast<Typedef*>(t);
+    if (td == nullptr) {
+      return nullptr;
+    }
+    t = &td->underlyingType();
+  }
+  while (auto* td = dynamic_cast<Typedef*>(t)) {
+    t = &td->underlyingType();
+  }
+  return t;
+}
+
 Type& BreakCycles::visit(Pointer& p) {
   Type& pointee = p.pointeeType();
-  NodeId id = pointee.id();
-  if (id >= 0 && onPath_.contains(id)) {
-    p.setPointeeType(wrapInCycleBreaker(pointee));
+  if (Type* target = onPathTarget(pointee)) {
+    p.setPointeeType(wrapInCycleBreaker(*target));
     return p;
   }
   p.setPointeeType(mutate(pointee));
@@ -82,9 +104,8 @@ Type& BreakCycles::visit(Pointer& p) {
 
 Type& BreakCycles::visit(Reference& r) {
   Type& pointee = r.pointeeType();
-  NodeId id = pointee.id();
-  if (id >= 0 && onPath_.contains(id)) {
-    r.setPointeeType(wrapInCycleBreaker(pointee));
+  if (Type* target = onPathTarget(pointee)) {
+    r.setPointeeType(wrapInCycleBreaker(*target));
     return r;
   }
   r.setPointeeType(mutate(pointee));
@@ -101,9 +122,8 @@ Type& BreakCycles::visit(Container& c) {
   // nothing container-kind-specific in the check.
   for (auto& param : c.templateParams) {
     Type& paramType = param.type();
-    NodeId id = paramType.id();
-    if (id >= 0 && onPath_.contains(id)) {
-      param.setType(wrapInCycleBreaker(paramType));
+    if (Type* target = onPathTarget(paramType)) {
+      param.setType(wrapInCycleBreaker(*target));
     } else {
       param.setType(mutate(paramType));
     }

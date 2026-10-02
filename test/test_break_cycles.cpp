@@ -185,3 +185,40 @@ TEST(BreakCyclesTest, SameCycleBreakerReusedAcrossPointerAndContainerEdges) {
       << "the Pointer edge and the Container Param edge should share the "
          "exact same CycleBreaker node, not two separately-allocated ones";
 }
+
+TEST(BreakCyclesTest, PointerToTypedefCycleBroken) {
+  // C's `typedef struct Node_s Node; struct Node_s { Node* next; };` idiom:
+  // the edge's immediate pointee is the Typedef, not the on-path Class. The
+  // cycle must still be broken, wrapping the underlying Class.
+  test(BreakCycles::createPass(),
+       R"(
+[0] Class: Node_s (size: 16)
+      Member: value (offset: 0)
+        Primitive: int32_t
+      Member: next (offset: 8)
+[1]     Pointer
+[2]       Typedef: Node
+            [0]
+)",
+       R"(
+[0] Class: Node_s (size: 16)
+      Member: value (offset: 0)
+        Primitive: int32_t
+      Member: next (offset: 8)
+[1]     Pointer
+          CycleBreaker
+            [0]
+)");
+}
+
+TEST(BreakCyclesTest, NonCyclicPointerToTypedefUntouched) {
+  testNoChange(BreakCycles::createPass(), R"(
+[0] Class: Outer (size: 8)
+      Member: ptr (offset: 0)
+[1]     Pointer
+[2]       Typedef: InnerAlias
+[3]         Class: Inner (size: 4)
+              Member: x (offset: 0)
+                Primitive: int32_t
+)");
+}

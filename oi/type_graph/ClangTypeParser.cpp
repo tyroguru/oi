@@ -386,8 +386,13 @@ Type& ClangTypeParser::enumerateReference(
 }
 
 Type& ClangTypeParser::enumeratePointer(const clang::PointerType& ty) {
-  // TODO: function pointers
   if (!chasePointer())
+    return makeType<Primitive>(ty, Primitive::Kind::StubbedPointer);
+
+  // Function pointers have no pointee data to capture - stub them, matching
+  // DrgnParser::enumeratePointer. isFunctionType() looks through sugar such
+  // as the ParenType in `void (*)(int)`, which enumerateType can't handle.
+  if (ty.getPointeeType()->isFunctionType())
     return makeType<Primitive>(ty, Primitive::Kind::StubbedPointer);
 
   Type& t = enumerateType(*ty.getPointeeType());

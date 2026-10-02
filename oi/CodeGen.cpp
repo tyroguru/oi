@@ -1177,9 +1177,29 @@ void genCycleBreakerTypeHandler(const CycleBreaker& cb, std::string& code) {
       "types::st::DynBytes<DB>, types::st::Unit<DB>>;\n";
   code +=
       "  static constexpr std::array<exporters::inst::Field, 0> fields{};\n";
+  // With capture-bytes on, `type` is DynBytes and the parent pointer's
+  // process_pointer_content leaves its payload for this field's processors
+  // to consume. Without a processor for it, the IntrospectionResult iterator
+  // never reads the nested blob and every read after it is misaligned.
+  // Surface it as the Element's opaque Bytes.
   code +=
-      "  static constexpr std::array<exporters::inst::ProcessorInst, 0> "
-      "processors{};\n";
+      "  static void process_nested_bytes(result::Element& el, "
+      "std::function<void(inst::Inst)>, ParsedData d) {\n";
+  code +=
+      "    el.data = result::Element::Bytes{"
+      "std::get<ParsedData::DynBytes>(d.val).value};\n";
+  code += "  }\n";
+  code += "  static constexpr auto choose_processors() {\n";
+  code += "    if constexpr (oi_capture_bytes) {\n";
+  code +=
+      "      return std::array<exporters::inst::ProcessorInst, 1>{"
+      "exporters::inst::ProcessorInst{types::st::DynBytes<DB>::describe, "
+      "&process_nested_bytes}};\n";
+  code += "    } else {\n";
+  code += "      return std::array<exporters::inst::ProcessorInst, 0>{};\n";
+  code += "    }\n";
+  code += "  }\n";
+  code += "  static constexpr auto processors = choose_processors();\n";
   code += "  static types::st::Unit<DB> getSizeType(Ctx& ctx, const " +
           cb.name() + "& t, type returnArg) {\n";
   code += "    if constexpr (oi_capture_bytes) {\n";
