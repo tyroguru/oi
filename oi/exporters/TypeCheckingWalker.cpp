@@ -80,6 +80,10 @@ std::optional<TypeCheckingWalker::Element> TypeCheckingWalker::advance() {
             stack.push(ty.element);
           }
           return TypeCheckingWalker::ListLength{el};
+        } else if constexpr (std::is_same_v<T, types::dy::Deferred>) {
+          // Deferred type - nothing of its own; walk the resolved shape.
+          stack.push(ty.resolve());
+          return advance();
         } else if constexpr (std::is_same_v<T, types::dy::Sum>) {
           // Sum type - pop one element as the index of the tagged union, and
           // place the matching element type on the stack. Return the value as a

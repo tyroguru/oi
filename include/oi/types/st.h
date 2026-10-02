@@ -328,6 +328,42 @@ class DynBytes {
 };
 
 /*
+ * Deferred<Resolver>
+ *
+ * Stands in for a static type that can't be named here without a cycle
+ * (e.g. a self-referential class's own shape, while that shape is still
+ * being defined). Writes nothing itself: resolve<Real>() hands the buffer to
+ * the real static type, which the caller names in a function body, where
+ * the full type is available. The stream is exactly what Real would write.
+ *
+ * Resolver must provide `static types::dy::Dynamic describe_deferred()`
+ * returning Real's describe, used by readers via dy::Deferred.
+ */
+template <typename DataBuffer, typename Resolver>
+class Deferred {
+ public:
+  Deferred(DataBuffer db) : _buf(db) {
+  }
+
+  template <typename Real, typename F>
+  Unit<DataBuffer> resolve(F const& cb) {
+    return cb(Real(_buf));
+  }
+
+  template <typename F>
+  Unit<DataBuffer> consume(F const& cb) {
+    return cb(*this);
+  }
+
+#ifdef DEFINE_DESCRIBE
+  static constexpr types::dy::Deferred describe{&Resolver::describe_deferred};
+#endif
+
+ private:
+  DataBuffer _buf;
+};
+
+/*
  * Pair<T1,T2>
  *
  * Represents a pair of types. Can be combined to hold an arbitrary number of
