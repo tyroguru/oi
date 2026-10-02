@@ -81,6 +81,9 @@ class BreakCycles final : public RecursiveMutator {
 
  private:
   Type& wrapInCycleBreaker(Type& pointee);
+  // The on-path Type an edge to `type` closes a cycle onto (looking through
+  // Typedefs, and returning the underlying non-Typedef), or nullptr.
+  Type* onPathTarget(Type& type) const;
 
   TypeGraph* typeGraph_ = nullptr;
 
