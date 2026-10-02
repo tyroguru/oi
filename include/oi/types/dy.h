@@ -52,6 +52,7 @@ struct DynBytes;
 struct Pair;
 struct Sum;
 struct List;
+struct Deferred;
 
 /*
  * Dynamic
@@ -65,7 +66,8 @@ using Dynamic = std::variant<std::reference_wrapper<const Unit>,
                              std::reference_wrapper<const DynBytes>,
                              std::reference_wrapper<const Pair>,
                              std::reference_wrapper<const Sum>,
-                             std::reference_wrapper<const List> >;
+                             std::reference_wrapper<const List>,
+                             std::reference_wrapper<const Deferred> >;
 
 struct Unit {};
 struct VarInt {};
@@ -101,6 +103,22 @@ struct List {
   }
 
   Dynamic element;
+};
+
+/*
+ * Deferred
+ *
+ * A shape that is only known by calling `resolve`. Used where the real
+ * shape can't be named statically without a cycle: a cycle-broken edge to a
+ * self-referential type (see CodeGen's genCycleBreakerTypeHandler), whose
+ * shape contains itself. Readers call resolve() when they reach it and
+ * carry on with the returned shape. Nothing extra is written to the stream.
+ */
+struct Deferred {
+  constexpr Deferred(Dynamic (*resolve_)()) : resolve(resolve_) {
+  }
+
+  Dynamic (*resolve)();
 };
 
 }  // namespace oi::types::dy

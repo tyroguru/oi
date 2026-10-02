@@ -60,6 +60,9 @@ ParsedData ParsedData::parse(std::vector<uint8_t>::const_iterator& it,
               .length = parseVarint(it),
               .values = {it, ty.element},
           };
+        } else if constexpr (std::is_same_v<T, types::dy::Deferred>) {
+          // Nothing of its own in the stream: parse the resolved shape.
+          return ParsedData::parse(it, ty.resolve());
         } else if constexpr (std::is_same_v<T, types::dy::Sum>) {
           auto index = parseVarint(it);
           assert(index < ty.variants.size());

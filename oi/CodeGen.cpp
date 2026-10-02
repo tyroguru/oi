@@ -129,8 +129,11 @@ struct OICaptureKeys : public T {
 // CodeGen::genCycleBreakerTypeHandler) - same size/layout as T (no members
 // added), just a different name, so a member declared as
 // `OICycleBreaker<T>*` doesn't require T to be complete at that point.
+// `oi_cycle_breaker_underlying` lets make_field see through the wrapper
+// (see FuncGen::DefineBasicTypeHandlers).
 template <typename T>
 struct OICycleBreaker : public T {
+  using oi_cycle_breaker_underlying = T;
 };
 )";
 }
@@ -1123,146 +1126,72 @@ struct TypeHandler<Ctx, std::variant<Types...>> {
 // genCycleBreakerTypeHandler
 //
 // Emits the TypeHandler<Ctx, OICycleBreaker<T>> specialization for a
-// CycleBreaker node inserted by the BreakCycles pass (research groundwork
-// for byte-accurate object capture/reconstruction - see
-// docs/object-capture-initial-thoughts.md, not part of this repo - Stage 3
-// of the agreed fix for
+// CycleBreaker node inserted by the BreakCycles pass (Stage 3 of the fix for
 // https://github.com/facebookexperimental/object-introspection/issues/293).
 //
 // A member whose pointee this wraps is declared in the generated code as
 // `OICycleBreaker<T>* member;` rather than `T* member;` (see
 // type_graph::Reference::regenerateName / type_graph::Pointer::
-// regenerateName, and genDefsClass's use of `mem.type().name()`). That
-// substitution is the entire fix: it stops the member's own decltype-driven
-// TypeHandler dispatch from ever naming T again, breaking the eager C++
-// template-alias cycle that #293 describes, while leaving T's own members
-// and TypeHandler completely untouched.
+// regenerateName, and genDefsClass's use of `mem.type().name()`). That stops
+// the member's own decltype-driven TypeHandler dispatch from naming T again
+// while T's own `type` alias is still being computed - the eager C++
+// template-alias cycle #293 describes.
 //
-// `type`/`describe`/`fields`/`processors` never delegate to T's own -
-// referencing so much as `TypeHandler<Ctx, T>::type::describe` from *here*
-// (a type alias, eagerly resolved) would recreate the exact cycle this node
-// exists to avoid: T's own `type` alias is what's still being *computed*
-// the first time this specialization is ever named. `type` itself stays a
-// trivial, T-independent shape (`Unit` when capture-bytes is off, matching
-// this project's existing "off means zero wire bytes" convention
-// everywhere else - or `DynBytes`, a runtime-length opaque blob, when it's
-// on) precisely so it never has to name T's shape.
+// So nothing at class scope here may name T's shape. With capture-bytes off,
+// `type` is Unit and nothing is written (the "off means zero wire bytes"
+// convention). With it on, `type` is types::st::Deferred: a stand-in that
+// writes nothing itself, and whose reader-side describe resolves to T's
+// real shape at runtime via describe_deferred(). Both describe_deferred()
+// and getSizeType() name T only in function *bodies*, which are instantiated
+// lazily - after T's own TypeHandler is complete.
 //
-// `getSizeType`'s *body*, unlike `type`, is a function - lazily
-// instantiated only once actually called, long after T's own TypeHandler
-// specialization is complete elsewhere (the same escape hatch this
-// project's static/dynamic type split already relies on for an object's
-// ordinary member functions). That's what makes it safe for this function
-// to recurse into T's real capture, genuinely writing T's real content
-// into the DynBytes blob - a private, nested sub-capture (see
-// __oi_cycle_breaker_nested_ctx) sharing this capture's own address
-// dedup set (ctx.pointers) but writing into its own temporary buffer, so
-// its length is known before it's embedded. Sharing the dedup set is load-
-// bearing, not an optimization: it's what makes a *genuine* cycle
-// terminate correctly (the one edge that's an actual repeat finds its
-// target already in ctx.pointers and stops, exactly like the outermost
-// capture already does today) while every other, merely first-seen
-// occurrence of this edge's type gets its real content captured, not just
-// its address - see defineCycleBreakerCaptureSupport's own doc for the
-// C++-template-instantiation reason this has to be one, fixed,
-// globally-declared type rather than declared fresh per call.
+// getSizeType writes T's content inline into the same stream, with the same
+// Ctx, exactly as an ordinary pointee would be. Recursion through further
+// cycle-broken edges reuses the same TypeHandler<Ctx, T> instantiation, so
+// it's runtime recursion, not new template instantiations. Sharing Ctx also
+// shares the address dedup set (ctx.pointers), which is what terminates a
+// genuine cycle: the repeated address is written as absent by the pointer
+// handler before it ever reaches here. Capture cost is linear in the number
+// of objects (a previous design captured each tail into a private,
+// length-prefixed buffer and copied it into its parent's: quadratic).
+//
+// Readers: make_field unwraps OICycleBreaker<T> to T (when capture-bytes is
+// on), so the IntrospectionResult iterator walks the chain as ordinary
+// Elements; ParsedData resolves the Deferred shape for reconstruction.
 void genCycleBreakerTypeHandler(const CycleBreaker& cb, std::string& code) {
   const std::string underlyingName = cb.underlyingType().name();
   code += "template <typename Ctx>\n";
   code += "class TypeHandler<Ctx, " + cb.name() + "> {\n";
   code += "  using DB = typename Ctx::DataBuffer;\n";
   code += " public:\n";
+  code += "  static types::dy::Dynamic describe_deferred() {\n";
+  code +=
+      "    return TypeHandler<Ctx, " + underlyingName + ">::type::describe;\n";
+  code += "  }\n";
   code +=
       "  using type = std::conditional_t<oi_capture_bytes, "
-      "types::st::DynBytes<DB>, types::st::Unit<DB>>;\n";
+      "types::st::Deferred<DB, TypeHandler>, types::st::Unit<DB>>;\n";
   code +=
       "  static constexpr std::array<exporters::inst::Field, 0> fields{};\n";
-  // With capture-bytes on, `type` is DynBytes and the parent pointer's
-  // process_pointer_content leaves its payload for this field's processors
-  // to consume. Without a processor for it, the IntrospectionResult iterator
-  // never reads the nested blob and every read after it is misaligned.
-  // Surface it as the Element's opaque Bytes.
   code +=
-      "  static void process_nested_bytes(result::Element& el, "
-      "std::function<void(inst::Inst)>, ParsedData d) {\n";
-  code +=
-      "    el.data = result::Element::Bytes{"
-      "std::get<ParsedData::DynBytes>(d.val).value};\n";
-  code += "  }\n";
-  code += "  static constexpr auto choose_processors() {\n";
-  code += "    if constexpr (oi_capture_bytes) {\n";
-  code +=
-      "      return std::array<exporters::inst::ProcessorInst, 1>{"
-      "exporters::inst::ProcessorInst{types::st::DynBytes<DB>::describe, "
-      "&process_nested_bytes}};\n";
-  code += "    } else {\n";
-  code += "      return std::array<exporters::inst::ProcessorInst, 0>{};\n";
-  code += "    }\n";
-  code += "  }\n";
-  code += "  static constexpr auto processors = choose_processors();\n";
+      "  static constexpr std::array<exporters::inst::ProcessorInst, 0> "
+      "processors{};\n";
   code += "  static types::st::Unit<DB> getSizeType(Ctx& ctx, const " +
           cb.name() + "& t, type returnArg) {\n";
   code += "    if constexpr (oi_capture_bytes) {\n";
-  code += "      std::vector<uint8_t> __oi_nested_buf;\n";
-  code +=
-      "      __oi_cycle_breaker_nested_ctx __oi_nested_ctx{.pointers = "
-      "ctx.pointers};\n";
-  code += "      typename TypeHandler<__oi_cycle_breaker_nested_ctx, " +
-          underlyingName +
-          ">::type __oi_nested_ret{"
-          "__oi_cycle_breaker_nested_ctx::DataBuffer{__oi_nested_buf}};\n";
-  code += "      TypeHandler<__oi_cycle_breaker_nested_ctx, " + underlyingName +
-          ">::getSizeType(\n"
-          "          __oi_nested_ctx, static_cast<const " +
-          underlyingName + "&>(t), __oi_nested_ret);\n";
-  code +=
-      "      return returnArg.write(std::span<const "
-      "uint8_t>(__oi_nested_buf));\n";
+  code += "      return returnArg.template resolve<typename TypeHandler<Ctx, " +
+          underlyingName + ">::type>(\n";
+  code += "          [&ctx, &t](auto ret) {\n";
+  code += "            return TypeHandler<Ctx, " + underlyingName +
+          ">::getSizeType(\n";
+  code += "                ctx, static_cast<const " + underlyingName +
+          "&>(t), ret);\n";
+  code += "          });\n";
   code += "    } else {\n";
   code += "      return returnArg;\n";
   code += "    }\n";
   code += "  }\n";
   code += "};\n\n";
-}
-
-bool typeGraphHasCycleBreaker(const TypeGraph& typeGraph) {
-  for (const Type& t : typeGraph.finalTypes) {
-    if (dynamic_cast<const CycleBreaker*>(&t))
-      return true;
-  }
-  return false;
-}
-
-// Declares __oi_cycle_breaker_nested_ctx, the one, fixed Ctx type every
-// genCycleBreakerTypeHandler specialization's nested sub-capture uses,
-// regardless of how deep the actual recursion goes at runtime or what the
-// outermost Ctx was. This has to be a single, globally-declared type, not a
-// fresh one declared locally inside getSizeType's own body: a local struct
-// there would be a *different type* at every nesting level (it's local to
-// a function template, so implicitly parameterized by that function's own
-// Ctx), which would mean the compiler has to instantiate a new
-// TypeHandler<ThatLevelsCtx, T> specialization per level - an unbounded
-// family of distinct template instantiations for a graph whose actual
-// depth is only known at runtime, i.e. exactly the "enormous template-
-// instantiation error" #293 was originally about, just reintroduced one
-// level down. A single, fixed type sidesteps this entirely: every level's
-// recursive call targets the *same*, already-instantiated
-// TypeHandler<__oi_cycle_breaker_nested_ctx, T>, so further recursion is
-// ordinary runtime function calls, not new template instantiations -
-// verified directly with an isolated prototype before landing this, given
-// how easy this class of mistake is to get wrong silently.
-//
-// Needs BackInserter<std::vector<uint8_t>> already declared - the nested
-// capture always writes into a private, temporary buffer so its length is
-// known before being embedded, regardless of what DataBuffer the *outer*
-// capture actually uses (a live ptrace target's DataSegment, for oid).
-void defineCycleBreakerCaptureSupport(std::string& code) {
-  code += R"(
-struct __oi_cycle_breaker_nested_ctx {
-  using DataBuffer = oi::detail::DataBuffer::BackInserter<std::vector<uint8_t>>;
-  PointerHashSet<>& pointers;
-};
-)";
 }
 
 void addCaptureKeySupport(std::string& code) {
@@ -1576,29 +1505,16 @@ void CodeGen::generateSharedDefinitions(TypeGraph& typeGraph,
   defineInternalTypes(code);
   FuncGen::DefineJitLog(code, config_.features);
 
-  bool needsCycleBreakerSupport = config_.features[Feature::TreeBuilderV2] &&
-                                  typeGraphHasCycleBreaker(typeGraph);
-
   if (config_.features[Feature::TreeBuilderV2]) {
     if (config_.features[Feature::Library]) {
       FuncGen::DefineBackInserterDataBuffer(code);
     } else {
       FuncGen::DefineDataSegmentDataBuffer(code);
-      if (needsCycleBreakerSupport) {
-        // genCycleBreakerTypeHandler's nested sub-capture always writes
-        // into a private, temporary std::vector, regardless of what the
-        // *outer* capture uses (a live ptrace target's DataSegment, here) -
-        // so it needs BackInserter declared too, which the Library branch
-        // above already gets for free.
-        FuncGen::DefineBackInserterDataBuffer(code);
-      }
     }
     code += "using namespace oi;\n";
     code += "using namespace oi::detail;\n";
     code += "using oi::exporters::ParsedData;\n";
     code += "using namespace oi::exporters;\n";
-    if (needsCycleBreakerSupport)
-      defineCycleBreakerCaptureSupport(code);
   }
 
   if (config_.features[Feature::CaptureThriftIsset]) {
@@ -2781,26 +2697,13 @@ std::string CodeGen::emitReconstructPointerValue(Type& pointeeType,
     code += "  " + wrappedTypeName + "* " + resultVar + " = nullptr;\n";
 
     if (config_.features[Feature::CaptureBytes] && realClass) {
-      // capture-bytes on: genCycleBreakerTypeHandler's getSizeType
-      // recursively captured the real pointee's own content into a
-      // nested, length-prefixed blob (a DynBytes payload) rather than
-      // nothing - decode that blob the same way the root itself gets
-      // decoded from raw bytes (ParsedData::parse against the real
-      // type's own describe shape), just one level deeper, and register
-      // the result *before* decoding its fields (matching the
-      // cycle-capable branch above) so a genuine back-edge nested inside
-      // it resolves correctly.
+      // capture-bytes on: genCycleBreakerTypeHandler's getSizeType wrote
+      // the real pointee's content inline, and the edge's Deferred shape
+      // resolves to the real type's own shape, so sum.value() decodes it
+      // exactly like an ordinary pointee. Register the result *before*
+      // decoding its fields (matching the cycle-capable branch above) so a
+      // genuine back-edge nested inside it resolves correctly.
       code += "  if (" + v + "_present) {\n";
-      code += "    auto " + v +
-              "_nested_bytes = std::get<oi::exporters::ParsedData::"
-              "DynBytes>(" +
-              v + "_sum.value().val).value;\n";
-      code +=
-          "    auto " + v + "_nested_it = " + v + "_nested_bytes.cbegin();\n";
-      code += "    auto " + v +
-              "_nested_data = oi::exporters::ParsedData::parse(" + v +
-              "_nested_it, TypeHandler<Ctx, " + pointeeTypeName +
-              ">::type::describe);\n";
       code += "    " + resultVar + " = static_cast<" + wrappedTypeName +
               "*>(::operator new(sizeof(" + pointeeTypeName + ")));\n";
       code += "    " + registryVar + "[" + v + "_addr] = static_cast<" +
@@ -2808,7 +2711,7 @@ std::string CodeGen::emitReconstructPointerValue(Type& pointeeType,
       const std::string& helperName =
           getOrEmitCycleReconstructHelper(*realClass);
       code += "    " + helperName + "(static_cast<" + pointeeTypeName + "*>(" +
-              resultVar + "), " + v + "_nested_data, __oi_reg);\n";
+              resultVar + "), " + v + "_sum.value(), __oi_reg);\n";
       code += "  } else if (" + v + "_addr != 0) {\n";
     } else {
       // capture-bytes off (or a shape BreakCycles can wrap but this
@@ -3021,24 +2924,11 @@ bool CodeGen::emitReconstructContainerCyclicPointerValue(Container& cont,
       // elsewhere in the graph that reaches this address can find it too.
       code += "    " + rawRegistryVar + "[" + v + "_addr] = " + v + "_new;\n";
     }
+    // A wrapped (cycle-broken) edge's Deferred shape resolves to the real
+    // type's own, so it decodes exactly like an unwrapped one.
     const std::string& helperName = getOrEmitCycleReconstructHelper(*realClass);
-    if (isWrappedEdge) {
-      code += "    auto " + v +
-              "_nested_bytes = std::get<oi::exporters::ParsedData::"
-              "DynBytes>(" +
-              v + "_sum.value().val).value;\n";
-      code +=
-          "    auto " + v + "_nested_it = " + v + "_nested_bytes.cbegin();\n";
-      code += "    auto " + v +
-              "_nested_data = oi::exporters::ParsedData::parse(" + v +
-              "_nested_it, TypeHandler<Ctx, " + pointeeTypeName +
-              ">::type::describe);\n";
-      code += "    " + helperName + "(" + v + "_new, " + v +
-              "_nested_data, __oi_reg);\n";
-    } else {
-      code += "    " + helperName + "(" + v + "_new, " + v +
-              "_sum.value(), __oi_reg);\n";
-    }
+    code += "    " + helperName + "(" + v + "_new, " + v +
+            "_sum.value(), __oi_reg);\n";
     code += "  } else if (" + v + "_addr != 0) {\n";
   } else {
     code += "  if (" + v + "_addr != 0) {\n";
@@ -3766,20 +3656,6 @@ void CodeGen::generateReconstruct(TypeGraph& typeGraph,
     code += "using oi::exporters::ParsedData;\n";
     code += "using namespace oi::exporters;\n";
     FuncGen::DefineJitLog(code, config_.features);
-
-    if (typeGraphHasCycleBreaker(typeGraph)) {
-      // genCycleBreakerTypeHandler's getSizeType body references
-      // __oi_cycle_breaker_nested_ctx/BackInserter by name - even though
-      // reconstruction never actually *calls* getSizeType (only ::type/
-      // ::describe), that reference is non-dependent on Ctx, so it's still
-      // checked when TypeHandler<Ctx, OICycleBreaker<T>> is defined, not
-      // deferred to whenever/whether getSizeType is ever instantiated (see
-      // genCycleBreakerTypeHandler's own doc). Fully-qualified as
-      // oi::detail::DataBuffer::BackInserter throughout, so no `using
-      // namespace oi::detail` is needed here.
-      FuncGen::DefineBackInserterDataBuffer(code);
-      defineCycleBreakerCaptureSupport(code);
-    }
   }
 
   if (container) {

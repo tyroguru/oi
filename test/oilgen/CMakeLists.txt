@@ -179,3 +179,8 @@ add_oilgen_aot_test(oilgen_aot_typedef_list
   FEATURES capture-bytes chase-raw-pointers
   EXTRA_TOML AotTypedefList.toml
 )
+
+add_oilgen_aot_test(oilgen_aot_list_capture_scaling
+  AotListCaptureScaling.cpp
+  FEATURES capture-bytes chase-raw-pointers
+)

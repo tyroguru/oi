@@ -645,16 +645,34 @@ struct TypeHandler;
   code += ";\n";
 
   code += R"(
+// The type a Field for T describes. A cycle breaker (OICycleBreaker<U>,
+// identified by its oi_cycle_breaker_underlying member) is described as U
+// when capture-bytes is on, because its capture writes U's content inline
+// (see CodeGen's genCycleBreakerTypeHandler); with it off, nothing is
+// written, so the wrapper's own empty fields/processors apply. Only used from
+// processor bodies, which are instantiated after U's TypeHandler is complete.
+template <typename T, typename = void>
+struct oi_field_type {
+  using type = T;
+};
+template <typename T>
+struct oi_field_type<T, std::void_t<typename T::oi_cycle_breaker_underlying>> {
+  using type = std::conditional_t<oi_capture_bytes,
+                                  typename T::oi_cycle_breaker_underlying,
+                                  T>;
+};
+
 template <typename Ctx, typename T>
 constexpr inst::Field make_field(std::string_view name) {
+  using U = typename oi_field_type<std::decay_t<T>>::type;
   return inst::Field{
-      sizeof(T),
-      ExclusiveSizeProvider<std::decay_t<T>>::size,
+      sizeof(U),
+      ExclusiveSizeProvider<U>::size,
       name,
-      NameProvider<std::decay_t<T>>::names,
-      TypeHandler<Ctx, std::decay_t<T>>::fields,
-      TypeHandler<Ctx, std::decay_t<T>>::processors,
-      std::is_fundamental_v<T>,
+      NameProvider<U>::names,
+      TypeHandler<Ctx, U>::fields,
+      TypeHandler<Ctx, U>::processors,
+      std::is_fundamental_v<U>,
   };
 }
 )";
