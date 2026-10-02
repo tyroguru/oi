@@ -41,8 +41,43 @@ add_custom_target(oilgen_aot_test_config
   DEPENDS "${OILGEN_AOT_TEST_CONFIG_PATH}"
 )
 
+# add_oilgen_aot_test(<target> <source> [FEATURES <f>...] [EXTRA_TOML <file>])
+# FEATURES/EXTRA_TOML give the test its own oilgen config: the shared base
+# config with those features enabled and the TOML fragment appended.
 function(add_oilgen_aot_test target source)
+  cmake_parse_arguments(PARSE_ARGV 2 ARG "" "EXTRA_TOML" "FEATURES")
   set(source_path "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
+
+  set(config_path "${OILGEN_AOT_TEST_CONFIG_PATH}")
+  set(config_dep oilgen_aot_test_config)
+  if(ARG_FEATURES OR ARG_EXTRA_TOML)
+    set(config_path "${CMAKE_CURRENT_BINARY_DIR}/${target}.oid.toml")
+    set(extra_path "")
+    if(ARG_EXTRA_TOML)
+      set(extra_path "${CMAKE_CURRENT_SOURCE_DIR}/${ARG_EXTRA_TOML}")
+    endif()
+    list(JOIN ARG_FEATURES "," features_csv)
+    add_custom_command(
+      OUTPUT "${config_path}"
+      COMMAND
+        ${CMAKE_COMMAND}
+        "-DFEATURES=${features_csv}"
+        "-DBASE=${OILGEN_AOT_TEST_CONFIG_PATH}"
+        "-DEXTRA=${extra_path}"
+        "-DOUT=${config_path}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/ConcatConfig.cmake"
+      DEPENDS
+        "${OILGEN_AOT_TEST_CONFIG_PATH}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ConcatConfig.cmake"
+        ${extra_path}
+      COMMENT
+        "Generating oilgen config for ${target}"
+      VERBATIM
+    )
+    add_custom_target(${target}_config DEPENDS "${config_path}")
+    add_dependencies(${target}_config oilgen_aot_test_config)
+    set(config_dep ${target}_config)
+  endif()
 
   # Step 1: compile the source normally. This is the "user" side of the
   # example - everything except the introspectImpl<T> definition.
@@ -83,13 +118,14 @@ function(add_oilgen_aot_test target source)
     COMMAND
       $<TARGET_FILE:oilgen>
       -p "${CMAKE_BINARY_DIR}"
-      "--config-file=${OILGEN_AOT_TEST_CONFIG_PATH}"
+      "--config-file=${config_path}"
       "--output=${generated_o}"
       "${source_path}"
     DEPENDS
       oilgen
       ${target}_obj
-      oilgen_aot_test_config
+      ${config_dep}
+      "${config_path}"
       "${source_path}"
     COMMENT
       "oilgen: generating AOT introspection code for ${source}"
@@ -136,4 +172,10 @@ add_oilgen_aot_test(oilgen_aot_plain_struct
 
 add_oilgen_aot_test(oilgen_aot_multiple_roots
   AotMultipleRoots.cpp
+)
+
+add_oilgen_aot_test(oilgen_aot_typedef_list
+  AotTypedefList.cpp
+  FEATURES capture-bytes chase-raw-pointers
+  EXTRA_TOML AotTypedefList.toml
 )
