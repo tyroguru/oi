@@ -92,11 +92,12 @@ TEST_F(AddChildrenTest, InheritancePolymorphic) {
                        Primitive: int32_t
                      Parent (offset: 0)
 [7]                    Typedef: __allocator_base<int>
-[6]                      Class: new_allocator<int> [__gnu_cxx::new_allocator<int>] (size: 1)
+[6]                      Class: __new_allocator<int> [std::__new_allocator<int>] (size: 1)
                            Param
                              Primitive: int32_t
-                           Function: new_allocator
-                           Function: new_allocator
+                           Function: __new_allocator
+                           Function: __new_allocator
+                           Function: operator=
                            Function: allocate
                            Function: deallocate
                            Function: _M_max_size

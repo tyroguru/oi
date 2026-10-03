@@ -34,8 +34,14 @@ DrgnParser DrgnParserTest::getDrgnParser(TypeGraph& typeGraph,
 
 drgn_type* DrgnParserTest::getDrgnRoot(std::string_view function) {
   irequest req{"entry", std::string{function}, "arg0"};
-  auto* drgnRoot = symbols_->getRootType(req)->type.type;
-  return drgnRoot;
+  auto root = symbols_->getRootType(req);
+  if (!root) {
+    // Throwing fails just this test (gtest catches it); dereferencing the
+    // empty optional crashed the whole test binary.
+    throw std::runtime_error("no root type for entry:" + std::string{function} +
+                             ":arg0");
+  }
+  return root->type.type;
 }
 
 std::string DrgnParserTest::run(std::string_view function,
@@ -265,11 +271,12 @@ TEST_F(DrgnParserTest, Container) {
                Primitive: int32_t
              Parent (offset: 0)
 [3]            Typedef: __allocator_base<int>
-[2]              Class: new_allocator<int> [__gnu_cxx::new_allocator<int>] (size: 1)
+[2]              Class: __new_allocator<int> [std::__new_allocator<int>] (size: 1)
                    Param
                      Primitive: int32_t
-                   Function: new_allocator
-                   Function: new_allocator
+                   Function: __new_allocator
+                   Function: __new_allocator
+                   Function: operator=
                    Function: allocate
                    Function: deallocate
                    Function: _M_max_size
@@ -491,16 +498,8 @@ TEST_F(DrgnParserTest, ClassTemplateValue) {
 }
 
 TEST_F(DrgnParserTest, TemplateEnumValue) {
-  testMultiCompilerGlob("oid_test_case_enums_params_scoped_enum_val",
-                        R"(
-[1] Pointer
-[0]   Class: MyClass<ns_enums_params::MyNS::ScopedEnum::One> [ns_enums_params::MyClass<ns_enums_params::MyNS::ScopedEnum::One>] (size: 4)
-        Param
-          Value: ns_enums_params::MyNS::ScopedEnum::One
-          Enum: ScopedEnum (size: 4)
-*
-)",
-                        R"(
+  // clang >= 16 spells enum template arguments like GCC: (Enum)value.
+  testGlob("oid_test_case_enums_params_scoped_enum_val", R"(
 [1] Pointer
 [0]   Class: MyClass<(ns_enums_params::MyNS::ScopedEnum)1> [ns_enums_params::MyClass<(ns_enums_params::MyNS::ScopedEnum)1>] (size: 4)
         Param
@@ -511,16 +510,8 @@ TEST_F(DrgnParserTest, TemplateEnumValue) {
 }
 
 TEST_F(DrgnParserTest, TemplateEnumValueGaps) {
-  testMultiCompilerGlob("oid_test_case_enums_params_scoped_enum_val_gaps",
-                        R"(
-[1] Pointer
-[0]   Class: ClassGaps<ns_enums_params::MyNS::EnumWithGaps::Twenty> [ns_enums_params::ClassGaps<ns_enums_params::MyNS::EnumWithGaps::Twenty>] (size: 4)
-        Param
-          Value: ns_enums_params::MyNS::EnumWithGaps::Twenty
-          Enum: EnumWithGaps (size: 4)
-*
-)",
-                        R"(
+  // clang >= 16 spells enum template arguments like GCC: (Enum)value.
+  testGlob("oid_test_case_enums_params_scoped_enum_val_gaps", R"(
 [1] Pointer
 [0]   Class: ClassGaps<(ns_enums_params::MyNS::EnumWithGaps)20> [ns_enums_params::ClassGaps<(ns_enums_params::MyNS::EnumWithGaps)20>] (size: 4)
         Param
@@ -531,16 +522,8 @@ TEST_F(DrgnParserTest, TemplateEnumValueGaps) {
 }
 
 TEST_F(DrgnParserTest, TemplateEnumValueNegative) {
-  testMultiCompilerGlob("oid_test_case_enums_params_scoped_enum_val_negative",
-                        R"(
-[1] Pointer
-[0]   Class: ClassGaps<ns_enums_params::MyNS::EnumWithGaps::MinusTwo> [ns_enums_params::ClassGaps<ns_enums_params::MyNS::EnumWithGaps::MinusTwo>] (size: 4)
-        Param
-          Value: ns_enums_params::MyNS::EnumWithGaps::MinusTwo
-          Enum: EnumWithGaps (size: 4)
-*
-)",
-                        R"(
+  // clang >= 16 spells enum template arguments like GCC: (Enum)value.
+  testGlob("oid_test_case_enums_params_scoped_enum_val_negative", R"(
 [1] Pointer
 [0]   Class: ClassGaps<(ns_enums_params::MyNS::EnumWithGaps)-2> [ns_enums_params::ClassGaps<(ns_enums_params::MyNS::EnumWithGaps)-2>] (size: 4)
         Param

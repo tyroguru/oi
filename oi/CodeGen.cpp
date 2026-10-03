@@ -1604,11 +1604,11 @@ void CodeGen::generateIntrospectRoot(std::string& code,
     FuncGen::DefineTopLevelIntrospect(code, typeToHash, rootTypeAlias);
   } else {
     // Unreachable from oilgen (TreeBuilderV2 is always enabled there - see
-    // OIGenerator::generate()'s featuresMap) - this non-TreeBuilderV2 path
-    // still hardcodes the un-indexed "__ROOT_TYPE__" spelling and is only
-    // ever exercised with a single root (rootIndex 0), via generate()'s own
-    // thin-wrapper call.
-    FuncGen::DefineTopLevelGetSizeRef(code, typeToHash, config_.features);
+    // OIGenerator::generate()'s featuresMap); this is oid's path, with a
+    // single root (rootIndex 0). It must use the same indexed alias declared
+    // above: the un-indexed "__ROOT_TYPE__" no longer exists here.
+    FuncGen::DefineTopLevelGetSizeRef(
+        code, typeToHash, config_.features, rootTypeAlias);
   }
 
   if (config_.features[Feature::TreeBuilderV2]) {

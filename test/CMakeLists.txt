@@ -148,13 +148,29 @@ endif()
 include_directories("${PROJECT_SOURCE_DIR}/extern/drgn/build")
 add_subdirectory("integration")
 
+# The smoke tests check that an *installed* OIL package can be found and
+# linked. Install into a private prefix inside the build tree first, rather
+# than relying on a prior `cmake --install` to CMAKE_INSTALL_PREFIX (which
+# may not exist, e.g. /var/empty/local in a nix shell).
+set(OIL_SMOKE_PREFIX ${CMAKE_CURRENT_BINARY_DIR}/install_smoke_prefix)
+
+add_test(
+  NAME oil_install_smoke_install
+  COMMAND ${CMAKE_COMMAND} --install ${CMAKE_BINARY_DIR}
+    --prefix ${OIL_SMOKE_PREFIX}
+)
+
 add_test(
   NAME oil_install_smoke_configure
   COMMAND ${CMAKE_COMMAND}
     -S ${CMAKE_CURRENT_SOURCE_DIR}/install_smoke
     -B ${CMAKE_CURRENT_BINARY_DIR}/install_smoke_build
     -G Ninja
-    -DCMAKE_PREFIX_PATH=${CMAKE_INSTALL_PREFIX}
+    -DCMAKE_PREFIX_PATH=${OIL_SMOKE_PREFIX}
+)
+
+set_tests_properties(oil_install_smoke_configure PROPERTIES
+  DEPENDS oil_install_smoke_install
 )
 
 add_test(
