@@ -60,9 +60,13 @@ class FuncGen {
                                             const std::string& linkageName,
                                             const std::string& rootTypeAlias);
 
-  static void DefineTopLevelGetSizeRef(std::string& testCode,
-                                       const std::string& rawType,
-                                       FeatureSet features);
+  // rootTypeAlias: the OIInternal alias naming the root type (CodeGen
+  // numbers them, "__ROOT_TYPE__<N>"; OICodeGen uses "__ROOT_TYPE__").
+  static void DefineTopLevelGetSizeRef(
+      std::string& testCode,
+      const std::string& rawType,
+      FeatureSet features,
+      const std::string& rootTypeAlias = "__ROOT_TYPE__");
   static void DefineTreeBuilderInstructions(
       std::string& testCode,
       const std::string& rawType,

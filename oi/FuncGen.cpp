@@ -319,12 +319,14 @@ void FuncGen::DefineTopLevelIntrospectNamed(std::string& code,
 
 void FuncGen::DefineTopLevelGetSizeRef(std::string& testCode,
                                        const std::string& rawType,
-                                       FeatureSet features) {
+                                       FeatureSet features,
+                                       const std::string& rootTypeAlias) {
   std::string func = R"(
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wunknown-attributes"
     /* RawType: %1% */
-    void __attribute__((used, retain)) getSize_%2$016x(const OIInternal::__ROOT_TYPE__& t)
+    void __attribute__((used, retain)) getSize_%2$016x(const OIInternal::)" +
+                     rootTypeAlias + R"(& t)
     #pragma GCC diagnostic pop
     {
     )";
