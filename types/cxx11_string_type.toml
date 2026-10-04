@@ -42,9 +42,13 @@ class CaptureKeyHandler<Ctx, std::__cxx11::basic_string<CharT, Traits, Allocator
   using type = types::st::List<DB, types::st::VarInt<DB>>;
 
   static auto captureKey(const std::__cxx11::basic_string<CharT, Traits, Allocator>& key, auto returnArg) {
+    // Each character goes after the previous one: write through `tail`, not
+    // `returnArg`, whose buffer position is the list's start. (Writing to
+    // `returnArg` only works with a DataBuffer that appends wherever it's
+    // written from, like OIL's back inserter; oid's data segment doesn't.)
     auto tail = returnArg.write(key.size());
     for (auto c : key) {
-      tail = returnArg.write((uintptr_t)c);
+      tail = tail.delegate([c](auto ret) { return ret.write((uintptr_t)c); });
     }
     return tail.finish();
   }
