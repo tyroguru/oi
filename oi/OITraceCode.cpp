@@ -50,8 +50,23 @@ constexpr std::array<T, N + 1> arrayPrependHelper(std::array<T, N> a,
 template <size_t Size = (1 << 20) / sizeof(uintptr_t)>
 class PointerHashSet {
  private:
+  // The table is cleared lazily, one cache line at a time. initialize() only
+  // clears `live`, one bit per line of `data`; a line's slots are zeroed the
+  // first time an insert reaches it, and a slot in a line that isn't live
+  // reads as empty. So initialize() writes 2 KiB, not the whole 1 MiB, and an
+  // introspection touches only the lines its pointers hash to. (Zeroing the
+  // whole table took ~8us hot and ~38us with cold caches on every call:
+  // more than introspecting a small object.) `data` therefore needs no
+  // initialization of its own: a heap-allocated set should be created with
+  // `new PointerHashSet<>` (default-initialized), not make_unique, which
+  // value-initializes and zeroes the whole table anyway.
+  static constexpr size_t kSlotsPerLine = 64 / sizeof(uintptr_t);
+  static_assert(Size % kSlotsPerLine == 0);
+  static constexpr size_t kLines = Size / kSlotsPerLine;
+
   // 1 MiB of pointers
   std::array<uintptr_t, Size> data;
+  std::array<uint64_t, (kLines + 63) / 64> live;
   size_t numEntries;
 
   // Set once add() has refused an insert purely because the table was
@@ -80,9 +95,27 @@ class PointerHashSet {
     return key;
   }
 
+  // The slot's value, or 0 if its line hasn't been used since initialize().
+  uintptr_t slot(size_t index) const noexcept {
+    size_t line = index / kSlotsPerLine;
+    return (live[line / 64] >> (line % 64)) & 1 ? data[index] : 0;
+  }
+
+  // Store into a slot, zeroing its line first if this is its first use.
+  void store(size_t index, uintptr_t pointer) noexcept {
+    size_t line = index / kSlotsPerLine;
+    uint64_t bit = uint64_t{1} << (line % 64);
+    if (!(live[line / 64] & bit)) {
+      for (size_t i = 0; i < kSlotsPerLine; i++)
+        data[line * kSlotsPerLine + i] = 0;
+      live[line / 64] |= bit;
+    }
+    data[index] = pointer;
+  }
+
  public:
   void initialize() noexcept {
-    data.fill(0);
+    live.fill(0);
     numEntries = 0;
     full_ = false;
   }
@@ -101,10 +134,10 @@ class PointerHashSet {
 
     uint64_t index = twang_mix64(pointer) % data.size();
     while (true) {
-      uintptr_t entry = data[index];
+      uintptr_t entry = slot(index);
 
       if (entry == 0) {
-        data[index] = pointer;
+        store(index, pointer);
         ++numEntries;
         return true;
       }

@@ -300,6 +300,9 @@ void IntegrationBase::compare_json(const bpt::ptree& expected_json,
                                    const std::string& full_key,
                                    bool expect_eq) {
   if (expected_json.empty()) {
+    // A leaf value, or an empty object/array (e.g. "members": []), which
+    // places no constraint on the actual children. Return here: below,
+    // begin() on an empty tree would be dereferenced.
     if (expect_eq) {
       ASSERT_EQ(expected_json.data(), actual_json.data())
           << "Incorrect value for key: " << full_key;
@@ -307,6 +310,7 @@ void IntegrationBase::compare_json(const bpt::ptree& expected_json,
       ASSERT_NE(expected_json.data(), actual_json.data())
           << "Incorrect value for key: " << full_key;
     }
+    return;
   }
 
   if (expected_json.begin()->first == "") {
