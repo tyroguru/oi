@@ -266,7 +266,9 @@ void __attribute__((used, retain)) introspect_%2$016x(
   v.clear();
   v.reserve(4096);
 
-  auto pointers = std::make_unique<PointerHashSet<>>();
+  // Not make_unique: that value-initializes, zeroing the whole 1 MiB table,
+  // which PointerHashSet clears lazily instead (see initialize()).
+  std::unique_ptr<PointerHashSet<>> pointers{new PointerHashSet<>};
   pointers->initialize();
 
   struct Context {
