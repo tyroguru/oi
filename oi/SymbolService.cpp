@@ -29,6 +29,7 @@
 #include "oi/OIParser.h"
 
 extern "C" {
+#include <dlfcn.h>
 #include <elfutils/known-dwarf.h>
 #include <elfutils/libdwfl.h>
 #include <fcntl.h>
@@ -185,6 +186,53 @@ struct ModParams {
  *
  */
 
+/*
+ * glibc implements functions such as memset and memmove as GNU indirect
+ * functions (STT_GNU_IFUNC): the symbol's address is a resolver that returns
+ * the implementation for this CPU, and the dynamic loader binds callers to
+ * that implementation. JIT code that called the symbol's address directly
+ * would run the resolver instead (memset would set nothing).
+ *
+ * Resolve an IFUNC the way the loader would: look it up with dlsym() in
+ * this process, which returns the implementation, and translate its offset
+ * into the target's mapping of the same file (for OIL, the target is this
+ * process). The two processes must map the same file; otherwise fail.
+ */
+static std::optional<GElf_Addr> resolveIfunc(Dwfl_Module* mod,
+                                             const std::string& symName) {
+  const char* targetFile = nullptr;
+  Dwarf_Addr targetBias = 0;
+  dwfl_module_info(
+      mod, nullptr, nullptr, nullptr, nullptr, nullptr, &targetFile, nullptr);
+  if (dwfl_module_getelf(mod, &targetBias) == nullptr ||
+      targetFile == nullptr) {
+    LOG(ERROR) << "IFUNC " << symName << ": no ELF file for its module";
+    return std::nullopt;
+  }
+
+  void* impl = dlsym(RTLD_DEFAULT, symName.c_str());
+  Dl_info info;
+  if (impl == nullptr || dladdr(impl, &info) == 0 ||
+      info.dli_fname == nullptr) {
+    LOG(ERROR) << "IFUNC " << symName << ": not resolvable in this process";
+    return std::nullopt;
+  }
+
+  std::error_code ec;
+  if (!fs::equivalent(targetFile, info.dli_fname, ec) || ec) {
+    LOG(ERROR) << "IFUNC " << symName << " resolves in " << info.dli_fname
+               << " here but is defined in " << targetFile
+               << " in the target; can't translate its address";
+    return std::nullopt;
+  }
+
+  auto offset = reinterpret_cast<uintptr_t>(impl) -
+                reinterpret_cast<uintptr_t>(info.dli_fbase);
+  VLOG(1) << "IFUNC " << symName << " resolved to offset " << std::hex << offset
+          << " in " << targetFile;
+  return targetBias + offset;
+}
+
 static int moduleCallback(Dwfl_Module* mod,
                           void** /* userData */,
                           const char* name,
@@ -234,6 +282,17 @@ static int moduleCallback(Dwfl_Module* mod,
         case STT_FILE:
         case STT_TLS:
         case STT_NOTYPE:
+          break;
+
+        case STT_GNU_IFUNC:
+          if (shndxp != SHN_UNDEF && symName == m->symName) {
+            if (auto impl = resolveIfunc(mod, symName)) {
+              m->value = *impl;
+              return DWARF_CB_ABORT;
+            }
+            m->value = 0;
+            return DWARF_CB_ABORT;
+          }
           break;
 
         case STT_OBJECT:
