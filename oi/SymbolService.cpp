@@ -847,13 +847,29 @@ static std::optional<std::shared_ptr<FuncDesc>> createFuncDesc(
     return std::nullopt;
   }
 
+  // DWARF has file addresses; the ranges must be where the function is
+  // loaded (e.g., for a PIE).
+  uint64_t bias = 0;
+  drgn_symbol* sym = nullptr;
+  if (auto* err =
+          drgn_program_find_symbol_by_name(prog, request.func.c_str(), &sym)) {
+    LOG(ERROR) << "Failed to look up symbol '" << request.func
+               << "': " << drgn_error_message(err);
+    drgn_error_destroy(err);
+    return std::nullopt;
+  }
+  if (auto* mod = drgn_module_find_by_address(prog, drgn_symbol_address(sym))) {
+    bias = drgn_module_debug_file_bias(mod);
+  }
+  drgn_symbol_destroy(sym);
+
   ptrdiff_t offset = 0;
   uintptr_t base = 0;
   uintptr_t start = 0;
   uintptr_t end = 0;
 
   while ((offset = dwarf_ranges(&funcDie, offset, &base, &start, &end)) > 0) {
-    fd->ranges.emplace_back(start, end);
+    fd->ranges.emplace_back(start + bias, end + bias);
   }
 
   if (offset < 0) {
