@@ -48,7 +48,6 @@ class FixedAllocator {
 '''
 [cases]
   [cases.int]
-    oid_skip = "Requires TreeBuilderV2"
     param_types = ["const std::map<int, int>&"]
     setup = "return {{{1,2},{3,4}}};"
     config_suffix = '''
@@ -81,7 +80,6 @@ class FixedAllocator {
     }]'''
 
   [cases.string]
-    oid_skip = "Requires TreeBuilderV2"
     param_types = ["const std::map<std::string, int>&"]
     setup = '''return
       {{
@@ -118,7 +116,6 @@ class FixedAllocator {
     }]'''
 
   [cases.enum]
-    oid_skip = "Requires TreeBuilderV2"
     param_types = ["const std::map<MyEnum, int>&"]
     setup = "return {{{MyEnum::One,2},{MyEnum::Three,4}}};"
     config_suffix = '''
@@ -151,7 +148,6 @@ class FixedAllocator {
     }]'''
 
   [cases.object]
-    oid_skip = "Requires TreeBuilderV2"
     param_types = ["const std::map<KeyObj, int, std::less<KeyObj>, FixedAllocator<std::pair<const KeyObj, int>>>&"]
     # We're going to record the addresses of these objects, so we use a custom
     # allocator based on mmap to get them at a known location in memory
@@ -191,7 +187,6 @@ class FixedAllocator {
     }]'''
 
   [cases.multi_level]
-    oid_skip = "Requires TreeBuilderV2"
     param_types = ["const std::map<int, std::map<std::string, std::vector<int>>>&"]
     setup = '''return
       {{
@@ -270,7 +265,6 @@ class FixedAllocator {
     }]'''
 
   [cases.config]
-    oid_skip = "Requires TreeBuilderV2"
     param_types = ["const MapHolder&"]
     setup = '''return {MapHolder{
       .captureMyKeys{ {1,2},{3,4} },
@@ -327,7 +321,6 @@ class FixedAllocator {
 
 
   [cases.typedef]
-    oid_skip = "Requires TreeBuilderV2"
     param_types = ["const MyTypedefIntMapHolder&"]
     setup = '''return {MyTypedefIntMapHolder{
       .captureMyKeys{ {1,2},{3,4} },
@@ -368,7 +361,6 @@ class FixedAllocator {
     }]'''
 
   [cases.std_unordered_map]
-    oid_skip = "Requires TreeBuilderV2"
     param_types = ["const std::unordered_map<int, int>&"]
     setup = "return {{{1,2}}};"
     config_suffix = '''
@@ -377,7 +369,6 @@ class FixedAllocator {
     '''
     expect_json_v2 = '[{"members": [{"data": 1}]}]'
   [cases.folly_sorted_vector_map]
-    oid_skip = "Requires TreeBuilderV2"
     param_types = ["const folly::sorted_vector_map<int, int>&"]
     setup = "return {{{1,2}}};"
     config_suffix = '''

@@ -22,7 +22,7 @@ target_link_libraries(symbol_service
   ${Boost_LIBRARIES}
   glog::glog
 
-  dw
+  elfutils
 )
 
 add_library(features Features.cpp)
@@ -61,7 +61,6 @@ target_link_libraries(codegen
 # against SymbolService/drgn.
 add_library(codegen_drgn
   CodeGenDrgn.cpp
-  OICodeGen.cpp
 )
 target_link_libraries(codegen_drgn
   codegen

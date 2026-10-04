@@ -15,8 +15,6 @@
  */
 #include "oi/OIDebugger.h"
 
-#include <folly/Varint.h>
-
 #include <algorithm>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/join.hpp>
@@ -35,6 +33,7 @@
 #include <span>
 
 extern "C" {
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
@@ -49,11 +48,14 @@ extern "C" {
 #include "oi/Config.h"
 #include "oi/ContainerInfo.h"
 #include "oi/Headers.h"
+#include "oi/IntrospectionResult.h"
 #include "oi/Metrics.h"
 #include "oi/OILexer.h"
-#include "oi/PaddingHunter.h"
 #include "oi/Portability.h"
 #include "oi/Syscall.h"
+#include "oi/exporters/Json.h"
+#include "oi/exporters/inst.h"
+#include "oi/result/SizedResult.h"
 #include "oi/type_graph/DrgnParser.h"
 #include "oi/type_graph/TypeGraph.h"
 
@@ -1917,23 +1919,23 @@ bool OIDebugger::removeTrap(pid_t pid, const trapInfo& t) {
   return true;
 }
 
-OIDebugger::OIDebugger(const OICodeGen::Config& genConfig,
+OIDebugger::OIDebugger(const OICodeGenConfig& genConfig,
                        OICompiler::Config ccConfig,
-                       TreeBuilder::Config tbConfig)
+                       OidOutputConfig outConfig)
     : cache{genConfig},
       compilerConfig{std::move(ccConfig)},
       generatorConfig{genConfig},
-      treeBuilderConfig{std::move(tbConfig)} {
+      outputConfig{std::move(outConfig)} {
   debug = true;
 
   VLOG(1) << "CodeGen config: " << generatorConfig.toString();
 }
 
 OIDebugger::OIDebugger(pid_t pid,
-                       const OICodeGen::Config& genConfig,
+                       const OICodeGenConfig& genConfig,
                        OICompiler::Config ccConfig,
-                       TreeBuilder::Config tbConfig)
-    : OIDebugger(genConfig, std::move(ccConfig), std::move(tbConfig)) {
+                       OidOutputConfig outConfig)
+    : OIDebugger(genConfig, std::move(ccConfig), std::move(outConfig)) {
   traceePid = pid;
   symbols = std::make_shared<SymbolService>(traceePid);
   setDataSegmentSize(dataSegSize);
@@ -1942,10 +1944,10 @@ OIDebugger::OIDebugger(pid_t pid,
 }
 
 OIDebugger::OIDebugger(fs::path debugInfo,
-                       const OICodeGen::Config& genConfig,
+                       const OICodeGenConfig& genConfig,
                        OICompiler::Config ccConfig,
-                       TreeBuilder::Config tbConfig)
-    : OIDebugger(genConfig, std::move(ccConfig), std::move(tbConfig)) {
+                       OidOutputConfig outConfig)
+    : OIDebugger(genConfig, std::move(ccConfig), std::move(outConfig)) {
   symbols = std::make_shared<SymbolService>(std::move(debugInfo));
   cache.symbols = symbols;
 }
@@ -2235,47 +2237,17 @@ bool OIDebugger::compileCode() {
         LOG(ERROR) << "No cache file found, exiting!";
         return false;
       }
-
-      if (req.type == "global") {
-        decltype(symbols->globalDescs) gds;
-        if (cache.load(req, OICache::Entity::GlobalDescs, gds)) {
-          symbols->globalDescs.merge(std::move(gds));
-        }
-      } else {
-        decltype(symbols->funcDescs) fds;
-        if (cache.load(req, OICache::Entity::FuncDescs, fds)) {
-          symbols->funcDescs.merge(std::move(fds));
-        }
-      }
     }
 
     auto sourcePath = cache.getPath(req, OICache::Entity::Source);
     auto objectPath = cache.getPath(req, OICache::Entity::Object);
-    auto typeHierarchyPath = cache.getPath(req, OICache::Entity::TypeHierarchy);
-    auto paddingInfoPath = cache.getPath(req, OICache::Entity::PaddingInfo);
 
-    if (!sourcePath || !objectPath || !typeHierarchyPath || !paddingInfoPath) {
+    if (!sourcePath || !objectPath) {
       LOG(ERROR) << "Failed to get all cache paths, aborting!";
       return false;
     }
 
-    bool skipCodeGen = cache.isEnabled() && fs::exists(*objectPath) &&
-                       fs::exists(*typeHierarchyPath) &&
-                       fs::exists(*paddingInfoPath);
-    if (skipCodeGen) {
-      std::pair<RootInfo, TypeHierarchy> th;
-      skipCodeGen =
-          skipCodeGen && cache.load(req, OICache::Entity::TypeHierarchy, th);
-
-      std::map<std::string, PaddingInfo> pad;
-      skipCodeGen =
-          skipCodeGen && cache.load(req, OICache::Entity::PaddingInfo, pad);
-
-      if (skipCodeGen) {
-        typeInfos.emplace(req, std::make_tuple(th.first, th.second, pad));
-      }
-    }
-
+    bool skipCodeGen = cache.isEnabled() && fs::exists(*objectPath);
     if (!skipCodeGen) {
       VLOG(2) << "Compiling probe for '" << req.arg
               << "' into: " << *objectPath;
@@ -2286,27 +2258,10 @@ bool OIDebugger::compileCode() {
         return false;
       }
 
-      bool doCompile = !cache.isEnabled() || !fs::exists(*objectPath);
-      if (doCompile) {
-        if (!compiler.compile(*code, *sourcePath, *objectPath)) {
-          LOG(ERROR) << "Failed to compile code";
-          return false;
-        }
+      if (!compiler.compile(*code, *sourcePath, *objectPath)) {
+        LOG(ERROR) << "Failed to compile code";
+        return false;
       }
-    }
-
-    if (cache.isEnabled() && !skipCodeGen) {
-      if (req.type == "global") {
-        cache.store(req, OICache::Entity::GlobalDescs, symbols->globalDescs);
-      } else {
-        cache.store(req, OICache::Entity::FuncDescs, symbols->funcDescs);
-      }
-
-      const auto& [rootType, typeHierarchy, paddingInfo] = typeInfos.at(req);
-      cache.store(req,
-                  OICache::Entity::TypeHierarchy,
-                  std::make_pair(rootType, typeHierarchy));
-      cache.store(req, OICache::Entity::PaddingInfo, paddingInfo);
     }
 
     objectFiles.insert(*objectPath);
@@ -2386,9 +2341,115 @@ bool OIDebugger::compileCode() {
       LOG(ERROR) << "Failed to write prologue";
       return false;
     }
+
+    if (!loadDecoder(compiler, objectFiles, syntheticSymbols)) {
+      LOG(ERROR) << "Failed to load the decoder for the captured data";
+      return false;
+    }
   }
 
   return true;
+}
+
+OIDebugger::DecoderSegment::~DecoderSegment() {
+  if (addr != nullptr) {
+    PLOG_IF(ERROR, munmap(addr, size) != 0) << "decoder segment unmap failed";
+  }
+}
+
+namespace {
+// The decoder copy of the JIT code only ever runs its tree builder
+// instructions' processors. Symbols that only the capture code uses (e.g., the
+// target's own functions) needn't exist here: they're bound to this.
+[[noreturn]] void decoderUnresolvedSymbol() {
+  LOG(FATAL) << "oid's decoder called a symbol that couldn't be resolved in "
+                "oid; see the VLOG(1) output of loadDecoder";
+}
+}  // namespace
+
+/*
+ * Relocate the JIT object files into this process too, so that the captured
+ * data can be decoded with their tree builder instructions (as OIL does
+ * in-process). External symbols are resolved in this process: the processors
+ * only use the C++ runtime and OI's own result types.
+ */
+bool OIDebugger::loadDecoder(
+    OICompiler& compiler,
+    const std::set<fs::path>& objectFiles,
+    const std::unordered_map<std::string, uintptr_t>& syntheticSymbols) {
+  decoderSeg.size = segConfig.textSegSize;
+  void* addr = mmap(nullptr,
+                    decoderSeg.size,
+                    PROT_READ | PROT_WRITE | PROT_EXEC,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    -1,
+                    0);
+  if (addr == MAP_FAILED) {
+    PLOG(ERROR) << "Failed to map the decoder segment";
+    return false;
+  }
+  decoderSeg.addr = addr;
+
+  auto resolver = [](const std::string& name) -> std::optional<uintptr_t> {
+    if (void* sym = dlsym(RTLD_DEFAULT, name.c_str())) {
+      return reinterpret_cast<uintptr_t>(sym);
+    }
+    VLOG(1) << "Decoder: " << name << " is not in oid, binding it to a stub";
+    return reinterpret_cast<uintptr_t>(&decoderUnresolvedSymbol);
+  };
+
+  auto relocRes =
+      compiler.applyRelocs(reinterpret_cast<uintptr_t>(decoderSeg.addr),
+                           objectFiles,
+                           syntheticSymbols,
+                           resolver);
+  if (!relocRes.has_value()) {
+    LOG(ERROR) << "Failed to relocate the decoder";
+    return false;
+  }
+
+  const auto& [_, segments, symbols] = *relocRes;
+  const auto& lastSeg = segments.back();
+  if (lastSeg.RelocAddr + lastSeg.Size >
+      reinterpret_cast<uintptr_t>(decoderSeg.addr) + decoderSeg.size) {
+    LOG(ERROR) << "Decoder too large for its segment";
+    return false;
+  }
+  for (const auto& [BaseAddr, RelocAddr, Size] : segments) {
+    std::memcpy(reinterpret_cast<void*>(RelocAddr),
+                reinterpret_cast<void*>(BaseAddr),
+                Size);
+  }
+  decoderSymbols = symbols;
+  return true;
+}
+
+/*
+ * The name of the type that the JIT code for this request introspects. Its
+ * hash names both the entry point (getSize_<hash>) and the tree builder
+ * instructions (treeBuilderInstructions<hash>).
+ */
+std::optional<std::string> OIDebugger::rootTypeName(const irequest& req) {
+  if (req.type == "global") {
+    const auto& gd = symbols->findGlobalDesc(req.func);
+    if (!gd) {
+      LOG(ERROR) << "Failed to find GlobalDesc for " << req.func;
+      return std::nullopt;
+    }
+    return gd->typeName;
+  }
+
+  const auto& fd = symbols->findFuncDesc(req);
+  if (!fd) {
+    LOG(ERROR) << "Failed to find FuncDesc for " << req.func;
+    return std::nullopt;
+  }
+  const auto& farg = fd->getArgument(req.arg);
+  if (!farg) {
+    LOG(ERROR) << "Failed to get argument for " << req.func << ':' << req.arg;
+    return std::nullopt;
+  }
+  return farg->typeName;
 }
 
 /* TODO: Needs some cleanup and generally making more resilient */
@@ -2748,8 +2809,7 @@ void OIDebugger::setDataSegmentSize(size_t size) {
   VLOG(1) << "setDataSegmentSize: segment size: " << dataSegSize;
 }
 
-bool OIDebugger::decodeTargetData(const DataHeader& dataHeader,
-                                  std::vector<uint64_t>& outVec) const {
+bool OIDebugger::checkDataHeader(const DataHeader& dataHeader) const {
   VLOG(1) << "== magicId: " << std::hex << dataHeader.magicId;
   VLOG(1) << "== cookie: " << std::hex << dataHeader.cookie;
   VLOG(1) << "== size: " << dataHeader.size;
@@ -2790,47 +2850,11 @@ bool OIDebugger::decodeTargetData(const DataHeader& dataHeader,
                " partial.";
   }
 
-  /*
-   * Currently  we use MAX_INT to indicate two things:
-   *  - a single MAX_INT indicates the end of results for  the current object
-   *  - two consecutive MAX_INT's indicate we have finished completely.
-   */
-  folly::ByteRange range(dataHeader.data, dataHeader.size - sizeof(dataHeader));
-
-  outVec.push_back(0);
-  outVec.push_back(0);
-  outVec.push_back(0);
-  outVec.push_back(0);
-  uint64_t prevVal = 0;
-
-  while (true) {
-    /* XXX Sort out the sentinel value!!! */
-    auto expected = tryDecodeVarint(range);
-    if (!expected) {
-      std::string s =
-          (expected.error() == folly::DecodeVarintError::TooManyBytes)
-              ? "Invalid varint value: too many bytes."
-              : "Invalid varint value: too few bytes.";
-      LOG(ERROR) << s;
-      return false;
-    }
-    uint64_t currVal = expected.value();
-
-    if (currVal == 123456789) {
-      if (prevVal == 123456789) {
-        break;
-      }
-    } else {
-      outVec.push_back(currVal);
-    }
-    prevVal = currVal;
-  }
-
   return true;
 }
 
 static bool dumpDataSegment(const irequest& req,
-                            const std::vector<uint64_t>& dataSeg) {
+                            std::span<const uint8_t> dataSeg) {
   char dumpPath[PATH_MAX] = {0};
   auto dumpPathSize = snprintf(dumpPath,
                                sizeof(dumpPath),
@@ -2849,8 +2873,7 @@ static bool dumpDataSegment(const irequest& req,
     return false;
   }
 
-  const auto outVecBytes = std::as_bytes(std::span{dataSeg});
-  dumpFile.write((const char*)outVecBytes.data(), outVecBytes.size());
+  dumpFile.write(reinterpret_cast<const char*>(dataSeg.data()), dataSeg.size());
   if (!dumpFile) {
     LOG(ERROR) << "Failed to write to data-segment file '" << dumpPath
                << "': " << strerror(errno);
@@ -2876,9 +2899,6 @@ bool OIDebugger::processTargetData() {
   assert(pdata.numReqs() == 1);
   const auto& preq = pdata.getReq();
 
-  PaddingHunter paddingHunter{};
-  TreeBuilder typeTree(treeBuilderConfig);
-
   /*
    * Global probes don't have multiple arguments, but calling `getReqForArg(X)`
    * on them still returns the corresponding irequest. We take advantage of that
@@ -2887,85 +2907,89 @@ bool OIDebugger::processTargetData() {
    */
   size_t argCount = preq.type == "global" ? 1 : preq.args.size();
 
-  std::vector<uint64_t> outVec{};
+  // One JSON array per argument, from the same exporter as OIL's.
+  std::vector<std::string> results;
+  bool anyDecoded = false;
   for (size_t i = 0; i < argCount; i++) {
     const auto& req = preq.getReqForArg(i);
     LOG(INFO) << "Processing data for argument: " << req.arg;
 
     const auto& dataHeader = *reinterpret_cast<DataHeader*>(res);
-    res += dataHeader.size;
-
-    outVec.clear();
-    if (!decodeTargetData(dataHeader, outVec)) {
-      LOG(ERROR) << "Failed to decode target data for arg: " << req.arg;
+    if (!checkDataHeader(dataHeader)) {
+      LOG(ERROR) << "Invalid target data for arg: " << req.arg;
       return false;
     }
+    res += dataHeader.size;
+    std::span<const uint8_t> data{dataHeader.data,
+                                  dataHeader.size - sizeof(dataHeader)};
 
-    if (treeBuilderConfig.dumpDataSegment) {
-      if (!dumpDataSegment(req, outVec)) {
+    if (outputConfig.dumpDataSegment) {
+      if (!dumpDataSegment(req, data)) {
         LOG(ERROR) << "Failed to dump data-segment for " << req.arg;
       }
-
-      // Skip running Tree Builder
       continue;
     }
 
-    auto typeInfo = typeInfos.find(req);
-    if (typeInfo == end(typeInfos)) {
-      LOG(ERROR) << "Failed to find corresponding typeInfo for arg: "
-                 << req.arg;
+    auto typeName = rootTypeName(req);
+    if (!typeName) {
       return false;
     }
-
-    const auto& [rootType, typeHierarchy, paddingInfos] = typeInfo->second;
-    VLOG(1) << "Root type addr: " << (void*)rootType.type.type;
-
-    if (treeBuilderConfig.features[Feature::GenPaddingStats]) {
-      paddingHunter.localPaddedStructs = paddingInfos;
-      typeTree.setPaddedStructs(&paddingHunter.localPaddedStructs);
+    auto instName = (boost::format("treeBuilderInstructions%016x") %
+                     std::hash<std::string>{}(*typeName))
+                        .str();
+    auto inst = decoderSymbols.find(instName);
+    if (inst == decoderSymbols.end()) {
+      LOG(ERROR) << "Couldn't find " << instName << " in the decoder";
+      return false;
     }
+    const auto& rootInst =
+        *reinterpret_cast<const oi::exporters::inst::Inst*>(inst->second);
 
     try {
-      typeTree.build(
-          outVec, rootType.varName, rootType.type.type, typeHierarchy);
-    } catch (std::exception& e) {
-      LOG(ERROR) << "Failed to run TreeBuilder for " << req.arg;
-      LOG(ERROR) << e.what();
-
-      if (treeBuilderConfig.dumpDataSegment) {
-        LOG(ERROR) << "Data-segment has been dumped for " << req.arg;
-      } else {
-        LOG(ERROR) << "Dumping data-segment for " << req.arg;
-        if (!dumpDataSegment(req, outVec)) {
-          LOG(ERROR) << "Failed to dump data-segment for " << req.arg;
-        }
+      IntrospectionResult result{{data.begin(), data.end()}, rootInst};
+      std::ostringstream json;
+      // As OIL's tests print it: with each element's total size.
+      oi::exporters::Json(json).print(oi::result::SizedResult(result));
+      results.push_back(std::move(json).str());
+      anyDecoded = true;
+    } catch (const std::exception& e) {
+      // Carry on with the other arguments; this one's output is empty.
+      LOG(ERROR) << "Failed to decode the data for " << req.arg << ": "
+                 << e.what();
+      if (!dumpDataSegment(req, data)) {
+        LOG(ERROR) << "Failed to dump data-segment for " << req.arg;
       }
-
-      continue;
-    }
-
-    if (treeBuilderConfig.features[Feature::GenPaddingStats]) {
-      paddingHunter.processLocalPaddingInfo();
+      results.emplace_back("[{}]");
     }
   }
 
-  if (treeBuilderConfig.dumpDataSegment) {
-    // Tree Builder was not run
+  if (!outputConfig.dumpDataSegment && !anyDecoded) {
+    LOG(ERROR) << "Nothing to output: failed to decode any argument";
+    return false;
+  }
+
+  if (outputConfig.dumpDataSegment || !outputConfig.jsonPath.has_value()) {
     return true;
   }
 
-  if (typeTree.emptyOutput()) {
-    LOG(FATAL)
-        << "Nothing to output: failed to run TreeBuilder on any argument";
+  // Merge the arguments' arrays into one, as TreeBuilder v1 did.
+  std::ofstream output(*outputConfig.jsonPath);
+  output << '[';
+  for (size_t i = 0; i < results.size(); i++) {
+    std::string_view r = results[i];
+    auto begin = r.find('[');
+    auto end = r.rfind(']');
+    if (begin == std::string_view::npos || end == std::string_view::npos ||
+        end <= begin) {
+      LOG(ERROR) << "Unexpected JSON from the exporter: " << r;
+      return false;
+    }
+    if (i != 0)
+      output << ',';
+    output << r.substr(begin + 1, end - begin - 1);
   }
-
-  if (treeBuilderConfig.jsonPath.has_value()) {
-    typeTree.dumpJson();
-  }
-
-  if (treeBuilderConfig.features[Feature::GenPaddingStats]) {
-    paddingHunter.outputPaddingInfo();
-  }
+  output << "]\n";
+  VLOG(1) << "Finished writing JSON to " << *outputConfig.jsonPath;
 
   return true;
 }
@@ -2976,43 +3000,12 @@ std::optional<std::string> OIDebugger::generateCode(const irequest& req) {
     return std::nullopt;
   }
 
-  std::string code(headers::oi_OITraceCode_cpp);
-
-  if (generatorConfig.features[Feature::TypeGraph]) {
-    // CodeGen v2
-    CodeGen codegen2{generatorConfig, *symbols};
-    codegen2.codegenFromDrgn(root->type.type, code);
-
-    TypeHierarchy th;
-    // Make this static as a big hack to extend the fake drgn_types' lifetimes
-    // for use in TreeBuilder
-    static std::list<drgn_type> drgnTypes;
-    drgn_type* rootType;
-    codegen2.exportDrgnTypes(th, drgnTypes, &rootType);
-
-    typeInfos[req] = {RootInfo{root->varName, {rootType, drgn_qualifiers{}}},
-                      th,
-                      std::map<std::string, PaddingInfo>{}};
-  } else {
-    // OICodeGen (v1)
-    auto codegen = OICodeGen::buildFromConfig(generatorConfig, *symbols);
-    if (!codegen) {
-      return nullopt;
-    }
-
-    RootInfo rootInfo = *root;
-    codegen->setRootType(rootInfo.type);
-    if (!codegen->generate(code)) {
-      LOG(ERROR) << "Failed to generate code for probe: " << req.type << ":"
-                 << req.func << ":" << req.arg;
-      return std::nullopt;
-    }
-
-    typeInfos.emplace(
-        req,
-        std::make_tuple(RootInfo{rootInfo.varName, codegen->getRootType()},
-                        codegen->getTypeHierarchy(),
-                        codegen->getPaddingInfo()));
+  std::string code;
+  CodeGen codegen{generatorConfig, *symbols};
+  if (!codegen.codegenFromDrgn(root->type.type, code)) {
+    LOG(ERROR) << "Failed to generate code for probe: " << req.type << ":"
+               << req.func << ":" << req.arg;
+    return std::nullopt;
   }
 
   if (auto sourcePath = cache.getPath(req, OICache::Entity::Source)) {

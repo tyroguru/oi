@@ -25,7 +25,7 @@ includes = ["folly/FBString.h", "utility"]
     ]
     '''
     expect_json_v2 = '''[{
-      "typeNames": ["folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>"],
+      "typeName": "folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>",
       "staticSize": 24,
       "exclusiveSize": 24,
       "size": 24,
@@ -58,7 +58,7 @@ includes = ["folly/FBString.h", "utility"]
     ]
     '''
     expect_json_v2 = '''[{
-      "typeNames": ["folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>"],
+      "typeName": "folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>",
       "staticSize": 24,
       "exclusiveSize": 24,
       "size": 24,
@@ -91,7 +91,7 @@ includes = ["folly/FBString.h", "utility"]
     ]
     '''
     expect_json_v2 = '''[{
-      "typeNames": ["folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>"],
+      "typeName": "folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>",
       "staticSize": 24,
       "exclusiveSize": 50,
       "size": 50,
@@ -124,7 +124,7 @@ includes = ["folly/FBString.h", "utility"]
     ]
     '''
     expect_json_v2 = '''[{
-      "typeNames": ["folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>"],
+      "typeName": "folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>",
       "staticSize": 24,
       "exclusiveSize": 1056,
       "size": 1056,
@@ -144,14 +144,14 @@ includes = ["folly/FBString.h", "utility"]
       "size": 1080,
       "members": [
         {
-          "typeNames": ["folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>"],
+          "typeName": "folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>",
           "staticSize": 24,
           "exclusiveSize": 1056,
           "size": 1056,
           "length": 1024,
           "capacity": 1024
         }, {
-          "typeNames": ["folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>"],
+          "typeName": "folly::basic_fbstring<int8_t, std::char_traits<int8_t>, std::allocator<int8_t>, folly::fbstring_core<int8_t>>",
           "staticSize": 24,
           "exclusiveSize": 24,
           "size": 24,

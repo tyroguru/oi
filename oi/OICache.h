@@ -20,7 +20,7 @@
 #include <memory>
 #include <optional>
 
-#include "oi/OICodeGen.h"
+#include "oi/OICodeGenConfig.h"
 #include "oi/OIParser.h"
 #include "oi/SymbolService.h"
 
@@ -28,7 +28,7 @@ namespace oi::detail {
 
 class OICache {
  public:
-  OICache(const OICodeGen::Config& generatorConfig)
+  OICache(const OICodeGenConfig& generatorConfig)
       : generatorConfig(generatorConfig) {
   }
 
@@ -41,30 +41,22 @@ class OICache {
 
   // We need the generator config to download the cache
   // with the matching configuration.
-  const OICodeGen::Config& generatorConfig;
+  const OICodeGenConfig& generatorConfig;
 
   // Entity is used to index the `extensions` array
   // So we must keep the Entity enum and `extensions` array in sync!
-  enum class Entity {
-    Source,
-    Object,
-    FuncDescs,
-    GlobalDescs,
-    TypeHierarchy,
-    PaddingInfo,
-    MAX
-  };
+  //
+  // Only generated code is cached. Function and global descriptors used to be
+  // too, but they hold drgn types, which can't be serialized; they're
+  // recomputed from the debug info instead.
+  enum class Entity { Source, Object, MAX };
   static constexpr std::array<const char*, static_cast<size_t>(Entity::MAX)>
-      extensions{".cc", ".o", ".fd", ".gd", ".th", ".pd"};
+      extensions{".cc", ".o"};
 
   bool isEnabled() const {
     return !basePath.empty();
   }
   std::optional<std::filesystem::path> getPath(const irequest&, Entity) const;
-  template <typename T>
-  bool store(const irequest&, Entity, const T&);
-  template <typename T>
-  bool load(const irequest&, Entity, T&);
 
   bool upload(const irequest& req);
   bool download(const irequest& req);

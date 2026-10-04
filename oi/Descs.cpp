@@ -42,16 +42,26 @@ std::optional<uintptr_t> FuncDesc::Arg::findAddress(
   user_regs_struct modifiedRegs = *regs;
   oi::detail::arch::setProgramCounter(modifiedRegs, pc);
 
-  struct drgn_object object {};
+  struct drgn_object object;
   BOOST_SCOPE_EXIT_ALL(&) {
     drgn_object_deinit(&object);
   };
 
-  if (auto* err = drgn_object_locate(&locator, &modifiedRegs, &object)) {
-    LOG(ERROR) << "Error while finding address of argument: " << err->message;
+  // drgn_object_locate() initializes `object`, even when it fails.
+  if (auto* err = drgn_object_locate(
+          &locator, &modifiedRegs, sizeof(modifiedRegs), &object)) {
+    LOG(ERROR) << "Error while finding address of argument: "
+               << drgn_error_message(err);
     drgn_error_destroy(err);
-  } else {
+  } else if (object.kind == DRGN_OBJECT_REFERENCE) {
     return object.address;
+  } else if (object.kind == DRGN_OBJECT_VALUE &&
+             object.encoding != DRGN_OBJECT_ENCODING_BUFFER) {
+    // The argument is in a register: e.g., a pointer passed in a register
+    // gives the pointer's value.
+    return object.value.uvalue;
+  } else {
+    LOG(ERROR) << "Argument is optimized out or not in memory";
   }
 
   LOG(WARNING) << "failed to locate argument with drgn! failing over to naive "

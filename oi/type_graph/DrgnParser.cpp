@@ -39,7 +39,7 @@ uint64_t get_drgn_type_size(struct drgn_type* type) {
 Primitive::Kind primitiveIntKind(struct drgn_type* type) {
   auto size = get_drgn_type_size(type);
 
-  bool is_signed = type->_private.is_signed;
+  bool is_signed = drgn_type_is_signed(type);
   switch (size) {
     case 1:
       return is_signed ? Primitive::Kind::Int8 : Primitive::Kind::UInt8;
@@ -213,8 +213,16 @@ void DrgnParser::enumerateClassParents(struct drgn_type* type,
       continue;
     }
 
-    auto& ptype = enumerateType(parent_qual_type.type);
+    // drgn reports a virtual base's offset as UINT64_MAX: it's only known at
+    // runtime, from the vtable. Leave it out; its bytes become padding.
     uint64_t poffset = drgn_parents[i].bit_offset;
+    if (poffset == UINT64_MAX) {
+      LOG(WARNING) << "Skipping virtual base (" << i << ") of "
+                   << getDrgnFullyQualifiedName(type);
+      continue;
+    }
+
+    auto& ptype = enumerateType(parent_qual_type.type);
     Parent p{ptype, poffset};
     parents.push_back(p);
   }
@@ -246,9 +254,9 @@ void DrgnParser::enumerateClassMembers(struct drgn_type* type,
 
     //    if (err || !isDrgnSizeComplete(member_qual_type.type)) {
     //      if (err) {
-    //        LOG(ERROR) << "Error when looking up member type " << err->code <<
-    //        " "
-    //                   << err->message << " " << typeName << " " <<
+    //        LOG(ERROR) << "Error when looking up member type " <<
+    //        drgn_error_code(err) << " "
+    //                   << drgn_error_message(err) << " " << typeName << " " <<
     //                   drgn_members[i].name;
     //      }
     //      VLOG(1) << "Type " << typeName
@@ -408,7 +416,8 @@ void DrgnParser::enumerateClassFunctions(struct drgn_type* type,
     }
 
     auto virtuality = drgn_type_virtuality(t.type);
-    std::string name = drgn_type_tag(t.type);
+    const char* functionName = drgn_type_function_name(t.type);
+    std::string name = functionName ? functionName : "";
     Function f(name, virtuality);
     functions.push_back(f);
   }
@@ -508,8 +517,8 @@ bool DrgnParser::chasePointer() const {
 }
 
 DrgnParserError::DrgnParserError(const std::string& msg, struct drgn_error* err)
-    : std::runtime_error{msg + ": " + std::to_string(err->code) + " " +
-                         err->message},
+    : std::runtime_error{msg + ": " + std::to_string(drgn_error_code(err)) +
+                         " " + drgn_error_message(err)},
       err_(err) {
 }
 
@@ -527,7 +536,8 @@ void warnForDrgnError(struct drgn_type* type,
   else if (drgn_type_has_name(type))
     name = drgn_type_name(type);
   LOG(WARNING) << msg << (name ? std::string{" for type '"} + name + "'" : "")
-               << ": " << err->code << " " << err->message;
+               << ": " << drgn_error_code(err) << " "
+               << drgn_error_message(err);
   drgn_error_destroy(err);
 }
 
@@ -537,9 +547,11 @@ std::string getDrgnFullyQualifiedName(drgn_type* type) {
   auto* err = drgn_type_fully_qualified_name(type, &nameStr, &length);
   if (err != nullptr)
     throw DrgnParserError("failed to get fully qualified name!", err);
-  if (nameStr != nullptr)
-    return nameStr;
-  return {};
+  if (nameStr == nullptr)
+    return {};
+  std::string name{nameStr, length};
+  free(nameStr);
+  return name;
 }
 
 }  // namespace

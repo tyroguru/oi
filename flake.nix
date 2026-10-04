@@ -24,12 +24,12 @@
         defaultLlvmVersion = 16;
         pkgs = import nixpkgs { inherit system; };
 
+        # tyroguru/drgn branch oi-upstream: upstream drgn plus OI's changes.
         drgnSrc = pkgs.fetchFromGitHub {
-          owner = "JakeHillion";
+          owner = "tyroguru";
           repo = "drgn";
-          rev = "b1f8c3e8526611b6720800250ba858a713dd9e4f";
-          hash = "sha256-5WhMHgx/RKtqjxGx4AyiqVKMot5xulr+6c8i2E9IxiA=";
-          fetchSubmodules = true;
+          rev = "43b86b2afa1e015fe275a10c8641d76e20fac217";
+          hash = "sha256-T03M7Te3GIIi8L1EqZkyYpT+61VlPHTVSEFuayOj8IA=";
         };
 
         mkOidPackage =
@@ -88,7 +88,6 @@
                 lzma
                 msgpack
                 range-v3
-                rocksdb_8_11
                 sqlite
                 tomlplusplus
                 zstd

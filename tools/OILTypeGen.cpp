@@ -30,7 +30,7 @@
 #include "oi/CodeGen.h"
 #include "oi/Config.h"
 #include "oi/Features.h"
-#include "oi/OICodeGen.h"
+#include "oi/OICodeGenConfig.h"
 #include "oi/OICompiler.h"
 #include "oi/SymbolService.h"
 
@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
   }
 
   OICompiler::Config compilerConfig;
-  OICodeGen::Config generatorConfig;
+  OICodeGenConfig generatorConfig;
   auto configPaths = configFilePaths();
   auto features = config::processConfigFiles(
       configPaths, defaultFeatures(), compilerConfig, generatorConfig);
