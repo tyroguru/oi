@@ -116,7 +116,8 @@ void AddChildren::recordChildren(drgn_type* type) {
       //      TODO useful error:
       //      LOG(ERROR) << "Error when looking up parent class for type " <<
       //      type
-      //                 << " err " << err->code << " " << err->message;
+      //                 << " err " << drgn_error_code(err) << " " <<
+      //                 drgn_error_message(err);
       drgn_error_destroy(err);
       continue;
     }
@@ -164,9 +165,10 @@ void AddChildren::enumerateChildClasses(SymbolService& symbols) {
   auto* prog = symbols.getDrgnProgram();
   drgn_error* err = drgn_type_iterator_create(prog, &typesIterator);
   if (err) {
-    //    LOG(ERROR) << "Error initialising drgn_type_iterator: " << err->code
+    //    LOG(ERROR) << "Error initialising drgn_type_iterator: " <<
+    //    drgn_error_code(err)
     //    << ", "
-    //               << err->message;
+    //               << drgn_error_message(err);
     drgn_error_destroy(err);
     abort();
   }
@@ -176,9 +178,10 @@ void AddChildren::enumerateChildClasses(SymbolService& symbols) {
     err = drgn_type_iterator_next(typesIterator, &t);
     if (err) {
       //      TODO usful error:
-      //      LOG(ERROR) << "Error from drgn_type_iterator_next: " << err->code
+      //      LOG(ERROR) << "Error from drgn_type_iterator_next: " <<
+      //      drgn_error_code(err)
       //      << ", "
-      //                 << err->message;
+      //                 << drgn_error_message(err);
       drgn_error_destroy(err);
       continue;
     }

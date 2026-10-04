@@ -301,7 +301,7 @@ def add_oid_integration_test(f, config, case_name, case):
     f.write(
         f"\n"
         f"TEST_F(OidIntegration, {case_str}) {{\n"
-        f"{generate_skip(case, 'oid')}"
+        f"{generate_skip(case, 'oid', also=('oil',))}"
         f'  std::string configPrefix = R"--({config_prefix})--";\n'
         f'  std::string configSuffix = R"--({config_suffix})--";\n'
         f"  ba::io_context ctx;\n"
@@ -317,12 +317,17 @@ def add_oid_integration_test(f, config, case_name, case):
         f"  EXPECT_EQ(target.proc.running(), true);\n"
     )
 
-    if "expect_json" in case:
+    # oid decodes its data with TreeBuilder v2, as OIL does, so it has the
+    # same expectations.
+    key = "expect_json"
+    if "expect_json_v2" in case:
+        key = "expect_json_v2"
+    if key in case:
         try:
-            json.loads(case["expect_json"])
+            json.loads(case[key])
         except json.decoder.JSONDecodeError as error:
             print(
-                f"\x1b[31m`expect_json` value for test case {config['suite']}.{case_name} was invalid JSON: {error}\x1b[0m",
+                f"\x1b[31m`{key}` value for test case {config['suite']}.{case_name} was invalid JSON: {error}\x1b[0m",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -330,7 +335,7 @@ def add_oid_integration_test(f, config, case_name, case):
         f.write(
             f"\n"
             f"  std::stringstream expected_json_ss;\n"
-            f'  expected_json_ss << R"--({case["expect_json"]})--";\n'
+            f'  expected_json_ss << R"--({case[key]})--";\n'
             f"  bpt::ptree expected_json, actual_json;\n"
             f"  bpt::read_json(expected_json_ss, expected_json);\n"
             f'  bpt::read_json("oid_out.json", actual_json);\n'
@@ -411,10 +416,18 @@ def add_oil_integration_test(f, config, case_name, case):
     f.write(f"}}\n")
 
 
-def generate_skip(case, specific):
+def generate_skip(case, specific, also=()):
+    """Skip the test if the case sets "skip" or "<specific>_skip".
+
+    `also` names other tools whose "<tool>_skip" applies too: oid decodes its
+    data with TreeBuilder v2, so OIL's TreeBuilder v2 skips apply to it.
+    """
     possibly_skip = ""
     skip_reason = case.get("skip", False)
     specific_skip_reason = case.get(f"{specific}_skip", False)
+    for other in also:
+        if not specific_skip_reason:
+            specific_skip_reason = case.get(f"{other}_skip", False)
     if specific_skip_reason or skip_reason:
         possibly_skip += "  if (!run_skipped_tests) {\n"
         possibly_skip += "    GTEST_SKIP()"

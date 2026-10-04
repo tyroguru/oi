@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <range/v3/algorithm/find_if.hpp>
@@ -151,16 +152,21 @@ class OICompiler {
    * @param BaseRelocAddress where will the relocated code be located
    * @param objectFiles paths to the object files to load and relocate
    * @param syntheticSymbols a symbol table for synthetic variables
+   * @param resolver if set, resolves the remaining external symbols instead of
+   * looking them up in the target process with SymbolService
    *
    * @return a `std::optional` containing @ref RelocResult if the relocation was
    * successful. Calling `applyRelocs()` again invalidates the Segments
    * information. So make sure you copy the Segments' content before doing
    * another call.
    */
+  using SymbolResolver =
+      std::function<std::optional<uintptr_t>(const std::string&)>;
   std::optional<RelocResult> applyRelocs(
       uintptr_t,
       const std::set<fs::path>&,
-      const std::unordered_map<std::string, uintptr_t>&);
+      const std::unordered_map<std::string, uintptr_t>&,
+      SymbolResolver resolver = {});
 
   /**
    * Locates all the offsets of the given @param insts opcodes

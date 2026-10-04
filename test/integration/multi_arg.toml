@@ -22,6 +22,7 @@ definitions = '''
   # Test that TreeBuilder failing to run on the first arg doesn't impact the second arg
   [cases.tb_fail_first_arg]
     oil_disable = "treebuilder tests are oid specific"
+    oid_skip = "TreeBuilder v1 specific: TreeBuilder v2 doesn't fail to decode this data"
     param_types = ["const std::string&", "const NodeA&"]
     args = "arg0,arg1"
     setup = """
@@ -34,6 +35,7 @@ definitions = '''
 
   [cases.tb_all_fail_crashes]
     oil_disable = "treebuilder tests are oid specific"
+    oid_skip = "TreeBuilder v1 specific: TreeBuilder v2 doesn't fail to decode this data"
     param_types = ["const std::string&", "const std::string&"]
     args = "arg0,arg1"
     setup = """

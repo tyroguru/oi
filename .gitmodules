@@ -1,3 +1,4 @@
 [submodule "extern/drgn"]
   path = extern/drgn
-  url = https://github.com/JakeHillion/drgn.git
+	url = https://github.com/tyroguru/drgn.git
+	branch = oi-upstream

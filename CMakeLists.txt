@@ -101,40 +101,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(GTest)
 
-### liburing (for RocksDB)
-find_package(uring REQUIRED)
-
-### rocksdb
-find_package(RocksDB 8.11 CONFIG)
-if (NOT RocksDB_FOUND)
-  FetchContent_Declare(
-    rocksdb
-    GIT_REPOSITORY https://github.com/facebook/rocksdb.git
-    GIT_TAG        f32521662acf3352397d438b732144c7813bbbec # v8.5.3
-    GIT_PROGRESS   TRUE
-  )
-  FetchContent_Populate(rocksdb)
-
-  add_custom_target(librocksdb_build ALL
-    WORKING_DIRECTORY ${rocksdb_SOURCE_DIR}
-    COMMAND cmake -G Ninja -B ${rocksdb_BINARY_DIR} -DCMAKE_BUILD_TYPE=Release -DWITH_GFLAGS=Off -DWITH_LIBURING=Off -DWITH_ZSTD=On -DFAIL_ON_WARNINGS=Off
-    COMMAND cmake --build ${rocksdb_BINARY_DIR} --target rocksdb
-    BYPRODUCTS ${rocksdb_BINARY_DIR}/librocksdb.a
-    COMMENT "Building RocksDB"
-    USES_TERMINAL
-  )
-
-  ### zstd (for rocksdb)
-  find_package(zstd REQUIRED)
-
-  add_library(librocksdb INTERFACE)
-  add_dependencies(librocksdb librocksdb_build)
-  target_include_directories(librocksdb INTERFACE SYSTEM "${rocksdb_SOURCE_DIR}/include")
-  target_link_libraries(librocksdb INTERFACE ${rocksdb_BINARY_DIR}/librocksdb.a zstd::zstd)
-
-  add_library(RocksDB::rocksdb ALIAS librocksdb)
-endif()
-
 ### folly
 ### use folly as a header only library. some features won't be supported.
 find_package(folly CONFIG)
@@ -191,10 +157,8 @@ if (DEFINED drgn_SOURCE_DIR)
     # polluting the source.
     file(COPY "${drgn_SOURCE_DIR}/" DESTINATION "${FETCHCONTENT_BASE_DIR}/drgn-src" NO_SOURCE_PERMISSIONS)
     SET(drgn_SOURCE_DIR "${FETCHCONTENT_BASE_DIR}/drgn-src")
-    SET(drgn_BINARY_DIR "${CMAKE_BINARY_DIR}/_deps/drgn-build")
 else()
     SET(drgn_SOURCE_DIR "${PROJECT_SOURCE_DIR}/extern/drgn")
-    SET(drgn_BINARY_DIR "${drgn_SOURCE_DIR}/build")
 endif()
 
 # TODO: No idea if this huge block is required, just picked from an example. There may be a short-hand.
@@ -280,55 +244,70 @@ find_package(OpenMP REQUIRED)
 find_package(LibLZMA REQUIRED)
 find_package(ZLIB REQUIRED)
 
-### drgn
-# The setup.py script in drgn is really meant to build drgn (python
-# debugger).  It shoves the C headers/lib in a temporary directory (which
-# is named 'build' below using --build-temp flag).  It may(not) make sense
-# to just build libdrgn manually.  Don't know how finicky the setup.py
-# might be. These are the steps to manually build lib/headers and output
-# to extern/drgn/libdrgn/build directory :-
-#
-# cd extern/drgn/libdrgn
-# autoreconf -i .
-# autoreconf -i ./elfutils
-# mkdir build
-# cd build
-# ../configure
-# make
-#
-# Since setup.py has a single cmd to do this, just use it for now.
+# drgn uses the system's elfutils (libdw and libelf), and so does OI
+# directly (SymbolService reads DWARF with libdw). Both must be the same
+# copy: two elfutils in one process don't mix.
+find_path(ELFUTILS_INCLUDE_DIR elfutils/libdw.h REQUIRED)
+find_library(LIBDW_LIBRARY dw REQUIRED)
+find_library(LIBELF_LIBRARY elf REQUIRED)
+add_library(elfutils INTERFACE)
+target_include_directories(elfutils SYSTEM INTERFACE ${ELFUTILS_INCLUDE_DIR})
+target_link_libraries(elfutils INTERFACE ${LIBDW_LIBRARY} ${LIBELF_LIBRARY})
 
-set(DRGN_CONFIGURE_FLAGS "--with-libkdumpfile=no")
+### drgn
+# Build libdrgn (drgn's C library, without Python) as a static library with
+# its own autotools build, in the build tree.
+set(drgn_BINARY_DIR "${CMAKE_BINARY_DIR}/drgn-build")
+set(DRGN_CONFIGURE_FLAGS
+  --disable-python
+  --disable-shared
+  --enable-static
+  --with-libkdumpfile=no
+  --with-debuginfod=no
+  --with-pcre2=no
+  --with-json-c=no
+)
 if (ASAN)
-  list(APPEND DRGN_CONFIGURE_FLAGS "--enable-asan=yes")
+  list(APPEND DRGN_CONFIGURE_FLAGS --enable-asan)
+endif()
+set(DRGN_CFLAGS "-O2 -g -fPIC")
+include(ProcessorCount)
+ProcessorCount(DRGN_BUILD_JOBS)
+if (DRGN_BUILD_JOBS EQUAL 0)
+  set(DRGN_BUILD_JOBS 1)
 endif()
 
+file(MAKE_DIRECTORY "${drgn_BINARY_DIR}")
 add_custom_target(drgn_build ALL
-  WORKING_DIRECTORY ${drgn_SOURCE_DIR}
-  COMMAND unset BISON_PKGDATADIR && CFLAGS="${DRGN_CFLAGS}"
-  CONFIGURE_FLAGS="${DRGN_CONFIGURE_FLAGS}" ${PYTHON} ./setup.py build --build-temp "${drgn_BINARY_DIR}"
-  BYPRODUCTS ${drgn_BINARY_DIR}/.libs/libdrgnimpl.a
-    ${drgn_BINARY_DIR}/velfutils/libdw/libdw.a
-    ${drgn_BINARY_DIR}/velfutils/libelf/libelf.a
-    ${drgn_BINARY_DIR}/velfutils/libdwelf/libdwelf.a
-  COMMENT "Building drgn"
+  COMMAND test "${drgn_SOURCE_DIR}/libdrgn/configure"
+    -nt "${drgn_SOURCE_DIR}/libdrgn/configure.ac"
+    || autoreconf -fi "${drgn_SOURCE_DIR}/libdrgn"
+  COMMAND test -f Makefile
+    || "${drgn_SOURCE_DIR}/libdrgn/configure" ${DRGN_CONFIGURE_FLAGS}
+       "CFLAGS=${DRGN_CFLAGS}"
+  COMMAND make -j${DRGN_BUILD_JOBS}
+  WORKING_DIRECTORY "${drgn_BINARY_DIR}"
+  BYPRODUCTS ${drgn_BINARY_DIR}/.libs/libdrgn.a
+  COMMENT "Building libdrgn"
   USES_TERMINAL
+  VERBATIM
 )
 
 add_library(drgn INTERFACE)
 add_dependencies(drgn drgn_build)
 target_link_libraries(drgn INTERFACE
-  ${drgn_BINARY_DIR}/.libs/libdrgnimpl.a
-  ${drgn_BINARY_DIR}/velfutils/libdw/libdw.a
-  ${drgn_BINARY_DIR}/velfutils/libelf/libelf.a
-  ${drgn_BINARY_DIR}/velfutils/libdwelf/libdwelf.a
+  ${drgn_BINARY_DIR}/.libs/libdrgn.a
+  elfutils
 
   BZip2::BZip2
   LibLZMA::LibLZMA
   OpenMP::OpenMP_CXX
   ZLIB::ZLIB
+  zstd::libzstd_shared
 )
-target_include_directories(drgn SYSTEM INTERFACE "${drgn_SOURCE_DIR}" "${drgn_BINARY_DIR}")
+# drgn.h is in the source tree; generated headers are in the build tree.
+target_include_directories(drgn SYSTEM INTERFACE
+  "${drgn_SOURCE_DIR}/libdrgn" "${drgn_BINARY_DIR}")
 
 if (STATIC_LINK)
   # glog links against the `gflags` target, which is an alias for `gflags_shared`
@@ -359,7 +338,6 @@ add_library(oicore
   oi/Config.cpp
   oi/Metrics.cpp
   oi/OICompiler.cpp
-  oi/PaddingHunter.cpp
 )
 target_include_directories(oicore SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 target_compile_definitions(oicore PRIVATE ${LLVM_DEFINITIONS})
@@ -397,16 +375,14 @@ target_link_libraries(oicore
   pthread
 )
 
-# The runtime-only pieces of what used to be oicore: caching debugger info to
-# RocksDB (OICache/Serialize, which also need FuncDesc/GlobalDesc from
-# symbol_service's own Descs.cpp) and JIT relocation against a live remote
-# process (OICompilerRelocs). Kept out of oicore so that oilgen - which only
+# The runtime-only pieces of what used to be oicore: oid's cache of generated
+# code (OICache) and JIT relocation against a live process
+# (OICompilerRelocs). Kept out of oicore so that oilgen - which only
 # ever compiles code, never attaches to a process - doesn't need to link
 # against SymbolService/drgn.
 add_library(oiruntime_cache
   oi/OICache.cpp
   oi/OICompilerRelocs.cpp
-  oi/Serialize.cpp
 )
 target_include_directories(oiruntime_cache SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 target_compile_definitions(oiruntime_cache PRIVATE ${LLVM_DEFINITIONS})
@@ -414,18 +390,15 @@ target_link_libraries(oiruntime_cache
   oicore
   symbol_service
   drgn
-  dw
+  elfutils
 )
 
-### TreeBuilder
+### Type checking for the TreeBuilder v2 data segment
 add_library(treebuilder
-  oi/TreeBuilder.cpp
   oi/exporters/TypeCheckingWalker.cpp
 )
 target_link_libraries(treebuilder
-  RocksDB::rocksdb
-  codegen_drgn
-  oicore # overkill but it does need a lot of stuff
+  oicore
 )
 
 
@@ -631,31 +604,18 @@ else()
   target_link_libraries(oil-typegen gflags_shared)
 endif()
 
-### Object Introspection cache Printer (OIP)
-add_executable(oip tools/OIP.cpp)
-target_link_libraries(oip oicore oiruntime_cache)
-
-### Object Introspection RocksDB Printer (OIRP)
-add_executable(oirp tools/OIRP.cpp)
-target_link_libraries(oirp
-  RocksDB::rocksdb
-  msgpackc
-)
-
-### Object Introspection Tree Builder (OITB)
-add_executable(oitb tools/OITB.cpp)
-target_link_libraries(oitb oicore oiruntime_cache treebuilder)
-
 ### Object Introspection Debugger (OID)
 add_executable(oid oi/OID.cpp oi/OIDebugger.cpp)
+# oid relocates its JIT code into itself too, to decode the captured data; the
+# code's references to OI's own result types are resolved with dlsym().
+set_target_properties(oid PROPERTIES ENABLE_EXPORTS ON)
 
-target_link_libraries(oid codegen_drgn oicore oiruntime_cache oid_parser treebuilder)
+target_link_libraries(oid codegen_drgn oicore oiruntime_cache oid_parser oil_static)
 if (STATIC_LINK)
   target_link_libraries(oid gflags_static)
 else()
   target_link_libraries(oid gflags_shared)
 endif()
-target_link_libraries(oid oicore treebuilder)
 
 ### Object Introspection Tests
 if (WITH_TESTS)
@@ -679,9 +639,7 @@ if (STATIC_LINK)
   target_link_libraries(oicore -static)
   target_link_libraries(oil_static -static)
   target_link_libraries(oil_jit_static -static)
-  target_link_libraries(oip -static)
   target_link_libraries(oid -static)
-  target_link_libraries(oitb -static)
 endif()
 
 # Add a hook for custom CMake rules

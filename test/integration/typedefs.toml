@@ -15,6 +15,7 @@ definitions = '''
     oil_disable = "oil can't pick up top level typedefs"
     param_types = ["TdUInt64"]
     setup = "return {};"
+    expect_json_v2 = '''[{"typeNames":["TdUInt64", "uint64_t", "__uint64_t", "uint64_t"], "staticSize":8, "exclusiveSize":8, "size":8, "members":[]}]'''
     expect_json = '''[{
       "staticSize":8,
       "dynamicSize":0,
@@ -33,6 +34,7 @@ definitions = '''
     oil_disable = "oil can't pick up top level typedefs"
     param_types = ["UsingUInt64"]
     setup = "return {};"
+    expect_json_v2 = '''[{"typeNames":["UsingUInt64", "uint64_t", "__uint64_t", "uint64_t"], "staticSize":8, "exclusiveSize":8, "size":8, "members":[]}]'''
     expect_json = '''[{
       "staticSize":8,
       "dynamicSize":0,
@@ -51,6 +53,7 @@ definitions = '''
     oil_disable = "oil can't pick up top level typedefs"
     param_types = ["const IntVector&"]
     setup = "return {};"
+    expect_json_v2 = '''[{"typeNames":["IntVector", "std::vector<int32_t, std::allocator<int32_t>>"], "staticSize":24, "exclusiveSize":24, "size":24, "length":0, "capacity":0, "members":[]}]'''
     expect_json = '''[{
       "staticSize":24,
       "dynamicSize":0,
@@ -72,6 +75,9 @@ definitions = '''
     oil_disable = "oil can't pick up top level typedefs"
     param_types = ["const Anonymous&"]
     setup = "return {};"
+    expect_json_v2 = '''[{"typeNames":["Anonymous", "__oi_anon_1"], "staticSize":4, "exclusiveSize":0, "size":4, "members":[
+      {"name":"n", "typeNames":["int32_t"], "staticSize":4, "exclusiveSize":4, "size":4}
+    ]}]'''
     expect_json = '''[{
       "staticSize":4,
       "dynamicSize":0,

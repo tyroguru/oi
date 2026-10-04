@@ -60,21 +60,6 @@ definitions = '''
         "exclusiveSize":0,
         "size":0
       }]}]'''
-  [cases.multidim_legacy] # Test for legacy behaviour. Remove with OICodeGen
-    oil_disable = 'oil only runs on codegen v2'
-    cli_options = ["-Ftype-graph", "-Ftree-builder-v2"]
-    param_types = ["const MultiDim&"]
-    setup = "return {};"
-    expect_json = '''[{
-      "staticSize":24,
-      "dynamicSize":0,
-      "members":[{
-        "staticSize":24,
-        "dynamicSize":0,
-        "length":6,
-        "capacity":6,
-        "elementStaticSize":4
-      }]}]'''
   [cases.multidim]
     
     param_types = ["const MultiDim&"]

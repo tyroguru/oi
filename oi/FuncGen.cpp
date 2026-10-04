@@ -373,6 +373,84 @@ void FuncGen::DefineTopLevelGetSizeRef(std::string& testCode,
   testCode.append(fmt.str());
 }
 
+/*
+ * DefineTopLevelGetSizeDataSegment
+ *
+ * oid's entry point under TreeBuilder v2: captures the root object into the
+ * data segment, after the same header as TreeBuilder v1's entry point
+ * (DefineTopLevelGetSizeRef), so oid finds and checks the results the same
+ * way. oid then decodes them with this object's tree builder instructions
+ * (see DefineTreeBuilderInstructions), loaded into its own process.
+ *
+ * The pointer set is 1 MiB, so it lives in this object's .bss rather than on
+ * the stack of the target thread, which oid has stopped in the middle of
+ * whatever it was doing.
+ */
+void FuncGen::DefineTopLevelGetSizeDataSegment(std::string& code,
+                                               const std::string& rawType,
+                                               const std::string& rootTypeAlias,
+                                               FeatureSet features) {
+  std::string func = R"(
+namespace {
+struct OidContext_%2$016x {
+  using DataBuffer = DataBuffer::DataSegment;
+
+  PointerHashSet<>& pointers;
+};
+PointerHashSet<> oidPointers_%2$016x;
+} // namespace
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunknown-attributes"
+/* RawType: %1% */
+void __attribute__((used, retain)) getSize_%2$016x(const OIInternal::%3%& t)
+#pragma GCC diagnostic pop
+{
+)";
+  if (features[Feature::JitTiming]) {
+    func += "  const auto startTime = std::chrono::steady_clock::now();\n";
+  }
+  func += R"(
+  auto data = reinterpret_cast<uintptr_t*>(dataBase);
+
+  size_t dataSegOffset = 0;
+  data[dataSegOffset++] = oidMagicId;
+  data[dataSegOffset++] = cookieValue;
+  uintptr_t& writtenSize = data[dataSegOffset++];
+  writtenSize = 0;
+  uintptr_t& timeTakenNs = data[dataSegOffset++];
+  size_t& pointersSize = data[dataSegOffset++];
+  size_t& pointersCapacity = data[dataSegOffset++];
+  dataSegOffset *= sizeof(uintptr_t);
+
+  JLOG("%1% @");
+  JLOGPTR(&t);
+
+  using Ctx = OidContext_%2$016x;
+  oidPointers_%2$016x.initialize();
+  oidPointers_%2$016x.add((uintptr_t)&t);
+  Ctx ctx{.pointers = oidPointers_%2$016x};
+
+  using ContentType = OIInternal::TypeHandler<Ctx, OIInternal::%3%>::type;
+  ContentType ret{Ctx::DataBuffer{dataSegOffset}};
+  writtenSize = OIInternal::getSizeType<Ctx>(ctx, t, ret).offset();
+  dataBase += writtenSize;
+  pointersSize = oidPointers_%2$016x.size();
+  pointersCapacity = oidPointers_%2$016x.capacity();
+)";
+  if (features[Feature::JitTiming]) {
+    func += R"(
+  timeTakenNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+    std::chrono::steady_clock::now() - startTime).count();
+)";
+  }
+  func += "}\n";
+
+  code.append((boost::format(func) % rawType %
+               std::hash<std::string>{}(rawType) % rootTypeAlias)
+                  .str());
+}
+
 // Referencing the bare (unqualified) `FakeContext` name here relies on it
 // already having been declared exactly once, earlier in this same
 // translation unit's shared (single, TU-wide) anonymous namespace - see

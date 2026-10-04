@@ -31,6 +31,9 @@
 extern "C" {
 #include <elfutils/known-dwarf.h>
 #include <elfutils/libdwfl.h>
+#include <fcntl.h>
+#include <gelf.h>
+#include <unistd.h>
 
 #include "drgn.h"
 #include "dwarf.h"
@@ -344,7 +347,8 @@ std::optional<drgn_qualified_type> SymbolService::findTypeOfSymbol(
           drgn_program_find_symbol_by_name(prog, symbolName.c_str(), &sym);
       err != nullptr) {
     LOG(ERROR) << "Failed to lookup symbol '" << symbolName
-               << "': " << err->code << " " << err->message;
+               << "': " << drgn_error_code(err) << " "
+               << drgn_error_message(err);
     drgn_error_destroy(err);
     return std::nullopt;
   }
@@ -370,7 +374,8 @@ std::optional<drgn_qualified_type> SymbolService::findTypeOfAddr(
           drgn_program_find_function_by_address(prog, addr, &name, &obj);
       err != nullptr) {
     LOG(ERROR) << "Failed to lookup function '" << reinterpret_cast<void*>(addr)
-               << "': " << err->code << " " << err->message;
+               << "': " << drgn_error_code(err) << " "
+               << drgn_error_message(err);
     drgn_error_destroy(err);
     return std::nullopt;
   }
@@ -402,8 +407,8 @@ std::optional<drgn_qualified_type> SymbolService::findTypeByName(
   drgn_type_iterator* typesIterator = nullptr;
   if (auto* err = drgn_type_iterator_create(drgnProg, &typesIterator);
       err != nullptr) {
-    LOG(ERROR) << "Error initialising drgn_type_iterator: " << err->code << ", "
-               << err->message;
+    LOG(ERROR) << "Error initialising drgn_type_iterator: "
+               << drgn_error_code(err) << ", " << drgn_error_message(err);
     drgn_error_destroy(err);
     return std::nullopt;
   }
@@ -415,8 +420,8 @@ std::optional<drgn_qualified_type> SymbolService::findTypeByName(
     drgn_qualified_type* t = nullptr;
     auto* err = drgn_type_iterator_next(typesIterator, &t);
     if (err != nullptr) {
-      LOG(ERROR) << "Error from drgn_type_iterator_next: " << err->code << ", "
-                 << err->message;
+      LOG(ERROR) << "Error from drgn_type_iterator_next: "
+                 << drgn_error_code(err) << ", " << drgn_error_message(err);
       drgn_error_destroy(err);
       continue;
     }
@@ -541,6 +546,67 @@ std::optional<std::string> SymbolService::locateBuildID() {
   return buildID;
 }
 
+namespace {
+
+// The address range spanned by an ELF file's loadable segments.
+std::optional<std::pair<uint64_t, uint64_t>> elfLoadableRange(
+    const char* path) {
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    PLOG(ERROR) << "Failed to open " << path;
+    return std::nullopt;
+  }
+  BOOST_SCOPE_EXIT_ALL(&) {
+    close(fd);
+  };
+  elf_version(EV_CURRENT);
+  Elf* elf = elf_begin(fd, ELF_C_READ_MMAP, nullptr);
+  if (elf == nullptr) {
+    LOG(ERROR) << "Failed to read " << path << ": " << elf_errmsg(-1);
+    return std::nullopt;
+  }
+  BOOST_SCOPE_EXIT_ALL(&) {
+    elf_end(elf);
+  };
+  size_t phnum;
+  if (elf_getphdrnum(elf, &phnum) != 0) {
+    LOG(ERROR) << "Failed to read " << path << ": " << elf_errmsg(-1);
+    return std::nullopt;
+  }
+  uint64_t start = UINT64_MAX, end = 0;
+  for (size_t i = 0; i < phnum; i++) {
+    GElf_Phdr phdr;
+    if (gelf_getphdr(elf, i, &phdr) == nullptr || phdr.p_type != PT_LOAD)
+      continue;
+    start = std::min(start, phdr.p_vaddr);
+    end = std::max(end, phdr.p_vaddr + phdr.p_memsz);
+  }
+  if (start >= end) {
+    LOG(ERROR) << path << " has no loadable segments";
+    return std::nullopt;
+  }
+  return std::make_pair(start, end);
+}
+
+// drgn matches debug info files to modules by build ID, and the binaries we
+// probe often have none (e.g., the nix toolchain doesn't emit one). If drgn's
+// own finders didn't find the main module's debug info, use the executable
+// itself regardless.
+drgn_error* loadMainModuleDebugInfo(drgn_module* mod, const char* path) {
+  if (!drgn_module_wants_debug_file(mod))
+    return nullptr;
+  VLOG(1) << "Using " << path << " as the debug info for the main module";
+  if (auto* err = drgn_module_try_file(mod, path, -1, true))
+    return err;
+  if (drgn_module_wants_debug_file(mod)) {
+    return drgn_error_format(
+        DRGN_ERROR_MISSING_DEBUG_INFO, "no debug info in %s", path);
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 struct drgn_program* SymbolService::getDrgnProgram() {
   if (hardDisableDrgn) {
     LOG(ERROR) << "drgn is disabled, refusing to initialize";
@@ -552,46 +618,73 @@ struct drgn_program* SymbolService::getDrgnProgram() {
   }
 
   LOG(INFO) << "Initialising drgn. This might take a while";
+  drgn_error* err = nullptr;
   switch (target.index()) {
     case 0: {
-      if (auto* err = drgn_program_from_pid(std::get<pid_t>(target), &prog)) {
-        LOG(ERROR) << "Failed to initialize drgn: " << err->code << " "
-                   << err->message;
-        return nullptr;
+      auto pid = std::get<pid_t>(target);
+      if ((err = drgn_program_from_pid(pid, &prog))) {
+        prog = nullptr;
+        break;
       }
-      auto executable = fs::read_symlink(
-          "/proc/" + std::to_string(std::get<pid_t>(target)) + "/exe");
-      const auto* executableCStr = executable.c_str();
-      if (auto* err = drgn_program_load_debug_info(
-              prog, &executableCStr, 1, false, false)) {
-        LOG(ERROR) << "Error loading debug info: " << err->message;
-        return nullptr;
+      // Only the main executable's debug info: OI doesn't look at types in
+      // shared libraries.
+      err = drgn_program_load_debug_info(prog, nullptr, 0, false, true);
+      if (err && drgn_error_code(err) == DRGN_ERROR_MISSING_DEBUG_INFO) {
+        drgn_error_destroy(err);
+        err = nullptr;
       }
+      if (err)
+        break;
+      auto* mod = drgn_module_find_main(prog, nullptr);
+      if (mod == nullptr) {
+        err = drgn_error_create(DRGN_ERROR_LOOKUP,
+                                "could not find the main module");
+        break;
+      }
+      auto executable =
+          fs::read_symlink("/proc/" + std::to_string(pid) + "/exe");
+      err = loadMainModuleDebugInfo(mod, executable.c_str());
       break;
     }
     case 1: {
-      if (auto* err = drgn_program_create(nullptr, &prog)) {
-        LOG(ERROR) << "Failed to create empty drgn program: " << err->code
-                   << " " << err->message;
-        return nullptr;
-      }
-
-      const char* path = std::get<fs::path>(target).c_str();
-      if (auto* err =
-              drgn_program_load_debug_info(prog, &path, 1, false, false)) {
-        LOG(ERROR) << "Failed to read debug info: " << err->code << " "
-                   << err->message;
-        drgn_program_destroy(prog);
-
+      if ((err = drgn_program_create(nullptr, &prog))) {
         prog = nullptr;
-        return prog;
+        break;
       }
-
-      LOG(INFO) << "Successfully read debug info";
+      // Without a process, there is no load address to compute the main
+      // module's bias from, so load the file as an "extra" module, at the
+      // addresses in the file (i.e., unbiased).
+      const char* path = std::get<fs::path>(target).c_str();
+      auto range = elfLoadableRange(path);
+      if (!range) {
+        err = drgn_error_format(
+            DRGN_ERROR_OTHER, "couldn't get the address range of %s", path);
+        break;
+      }
+      drgn_module* mod;
+      bool created;
+      if ((err =
+               drgn_module_find_or_create_extra(prog, path, 0, &mod, &created)))
+        break;
+      if ((err =
+               drgn_module_set_address_range(mod, range->first, range->second)))
+        break;
+      err = loadMainModuleDebugInfo(mod, path);
       break;
     }
   }
 
+  if (err) {
+    LOG(ERROR) << "Failed to initialize drgn: " << drgn_error_code(err) << " "
+               << drgn_error_message(err);
+    drgn_error_destroy(err);
+    if (prog != nullptr)
+      drgn_program_destroy(prog);
+    prog = nullptr;
+    return nullptr;
+  }
+
+  LOG(INFO) << "Successfully read debug info";
   return prog;
 }
 
@@ -600,7 +693,6 @@ struct drgn_program* SymbolService::getDrgnProgram() {
  * task is to extract the location information for this parameter if any exist.
  */
 static void parseFormalParam(Dwarf_Die& param,
-                             struct drgn_elf_file* file,
                              struct drgn_program* prog,
                              Dwarf_Die& funcDie,
                              std::shared_ptr<FuncDesc>& fd) {
@@ -612,11 +704,10 @@ static void parseFormalParam(Dwarf_Die& param,
    * any new error handling.
    */
   auto farg = fd->addArgument();
-  auto* err =
-      drgn_object_locator_init(prog, file, &funcDie, &param, &farg->locator);
+  auto* err = drgn_object_locator_init(prog, &funcDie, &param, &farg->locator);
   if (err) {
     LOG(ERROR) << "Could not initialize drgn_object_locator for parameter: "
-               << err->code << ", " << err->message;
+               << drgn_error_code(err) << ", " << drgn_error_message(err);
     farg->valid = false;
     return;
   }
@@ -654,8 +745,8 @@ static bool handleInlinedFunction(const irequest& request,
   struct drgn_type_inlined_instances_iterator* iter = nullptr;
   auto* err = drgn_type_inlined_instances_iterator_init(funcType.type, &iter);
   if (err) {
-    LOG(ERROR) << "Error creating inlined instances iterator: " << err->message;
-    return false;
+    LOG(ERROR) << "Error creating inlined instances iterator: " <<
+drgn_error_message(err); return false;
   }
   if (strcmp(drgn_type_parameters(funcType.type)[0].name, "this") == 0) {
     funcDesc->isMethod = true;
@@ -676,7 +767,7 @@ static bool handleInlinedFunction(const irequest& request,
     err = drgn_type_inlined_instances_iterator_next(iter, &inlinedInstance);
     if (err) {
       LOG(ERROR) << "Error advancing inlined instances iterator: "
-                 << err->message;
+                 << drgn_error_message(err);
       return false;
     }
     if (!inlinedInstance) {
@@ -715,8 +806,8 @@ static bool handleInlinedFunction(const irequest& request,
 
   err = drgn_type_dwarf_die(inlinedInstance, &funcDie);
   if (err) {
-    LOG(ERROR) << "Error obtaining DWARF DIE from type: " << err->message;
-    return false;
+    LOG(ERROR) << "Error obtaining DWARF DIE from type: " <<
+drgn_error_message(err); return false;
   }
   funcType.type = inlinedInstance;
   module = inlinedInstance->_private.module;
@@ -741,10 +832,10 @@ static std::optional<std::shared_ptr<FuncDesc>> createFuncDesc(
 
   auto fd = std::make_shared<FuncDesc>(request.func);
 
-  drgn_elf_file* file = ft->type->_private.file;
   Dwarf_Die funcDie;
   if (auto* err = drgn_type_dwarf_die(ft->type, &funcDie); err != nullptr) {
-    LOG(ERROR) << "Error obtaining DWARF DIE from type: " << err->message;
+    LOG(ERROR) << "Error obtaining DWARF DIE from type: "
+               << drgn_error_message(err);
     return std::nullopt;
   }
 
@@ -756,13 +847,29 @@ static std::optional<std::shared_ptr<FuncDesc>> createFuncDesc(
     return std::nullopt;
   }
 
+  // DWARF has file addresses; the ranges must be where the function is
+  // loaded (e.g., for a PIE).
+  uint64_t bias = 0;
+  drgn_symbol* sym = nullptr;
+  if (auto* err =
+          drgn_program_find_symbol_by_name(prog, request.func.c_str(), &sym)) {
+    LOG(ERROR) << "Failed to look up symbol '" << request.func
+               << "': " << drgn_error_message(err);
+    drgn_error_destroy(err);
+    return std::nullopt;
+  }
+  if (auto* mod = drgn_module_find_by_address(prog, drgn_symbol_address(sym))) {
+    bias = drgn_module_debug_file_bias(mod);
+  }
+  drgn_symbol_destroy(sym);
+
   ptrdiff_t offset = 0;
   uintptr_t base = 0;
   uintptr_t start = 0;
   uintptr_t end = 0;
 
   while ((offset = dwarf_ranges(&funcDie, offset, &base, &start, &end)) > 0) {
-    fd->ranges.emplace_back(start, end);
+    fd->ranges.emplace_back(start + bias, end + bias);
   }
 
   if (offset < 0) {
@@ -809,7 +916,7 @@ static std::optional<std::shared_ptr<FuncDesc>> createFuncDesc(
                           "parameters tag!";
         }
 
-        parseFormalParam(child, file, prog, funcDie, fd);
+        parseFormalParam(child, prog, funcDie, fd);
         break;
 
       case DW_TAG_unspecified_parameters:
@@ -895,7 +1002,8 @@ std::shared_ptr<GlobalDesc> SymbolService::findGlobalDesc(
                                            DRGN_FIND_OBJECT_ANY,
                                            &globalObj)) {
     LOG(ERROR) << "Failed to lookup global variable '" << global
-               << "': " << err->code << " " << err->message;
+               << "': " << drgn_error_code(err) << " "
+               << drgn_error_message(err);
 
     return nullptr;
   }
@@ -939,7 +1047,8 @@ std::optional<RootInfo> SymbolService::getRootType(const irequest& req) {
             drgnProg, req.func.c_str(), nullptr, DRGN_FIND_OBJECT_ANY, &global);
         err != nullptr) {
       LOG(ERROR) << "Failed to lookup global variable '" << req.func
-                 << "': " << err->code << " " << err->message;
+                 << "': " << drgn_error_code(err) << " "
+                 << drgn_error_message(err);
       drgn_error_destroy(err);
       return std::nullopt;
     }
@@ -1009,7 +1118,8 @@ std::optional<RootInfo> SymbolService::getRootType(const irequest& req) {
   drgn_qualified_type paramType{};
   if (auto* err = drgn_parameter_type(&params[argIdx], &paramType);
       err != nullptr) {
-    LOG(ERROR) << "Failed to get params: " << err->code << " " << err->message;
+    LOG(ERROR) << "Failed to get params: " << drgn_error_code(err) << " "
+               << drgn_error_message(err);
     drgn_error_destroy(err);
     return std::nullopt;
   }

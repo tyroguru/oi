@@ -17,49 +17,41 @@
 
 #include <glog/logging.h>
 
-#include <boost/archive/text_iarchive.hpp>
-#include <boost/archive/text_oarchive.hpp>
-#include <fstream>
-
 #include "oi/Descs.h"
-#include "oi/OICodeGen.h"
 #include "oi/Portability.h"
-#include "oi/Serialize.h"
 
 #if OI_PORTABILITY_META_INTERNAL()
 #include "object-introspection/internal/GobsService.h"
 #include "object-introspection/internal/ManifoldCache.h"
 #endif
 
+namespace fs = std::filesystem;
+
 namespace oi::detail {
 
+// Cached code is named after the type it introspects.
 static std::optional<std::reference_wrapper<const std::string>> getEntName(
-    SymbolService& symbols, const irequest& req, OICache::Entity ent) {
-  if (ent == OICache::Entity::FuncDescs ||
-      ent == OICache::Entity::GlobalDescs) {
-    return req.func;
-  } else {
-    if (req.type == "global") {
-      const auto& globalDesc = symbols.findGlobalDesc(req.func);
-      if (!globalDesc) {
-        return std::nullopt;
-      }
-
-      return globalDesc->typeName;
-    } else {
-      const auto& funcDesc = symbols.findFuncDesc(req);
-      if (!funcDesc) {
-        return std::nullopt;
-      }
-
-      const auto& arg = funcDesc->getArgument(req.arg);
-      if (!arg) {
-        return std::nullopt;
-      }
-
-      return arg->typeName;
+    SymbolService& symbols, const irequest& req) {
+  if (req.type == "global") {
+    const auto& globalDesc = symbols.findGlobalDesc(req.func);
+    if (!globalDesc) {
+      return std::nullopt;
     }
+
+    return globalDesc->typeName;
   }
+
+  const auto& funcDesc = symbols.findFuncDesc(req);
+  if (!funcDesc) {
+    return std::nullopt;
+  }
+
+  const auto& arg = funcDesc->getArgument(req.arg);
+  if (!arg) {
+    return std::nullopt;
+  }
+
+  return arg->typeName;
 }
 
 std::optional<fs::path> OICache::getPath(const irequest& req,
@@ -70,97 +62,13 @@ std::optional<fs::path> OICache::getPath(const irequest& req,
 
   auto ext = extensions[static_cast<size_t>(ent)];
 
-  const auto& entName = getEntName(*symbols, req, ent);
+  const auto& entName = getEntName(*symbols, req);
   if (!entName.has_value()) {
     return std::nullopt;
   }
 
   return basePath / (hash(*entName) + ext);
 }
-
-template <typename T>
-bool OICache::load(const irequest& req, Entity ent, T& data) {
-  if (!isEnabled())
-    return false;
-  try {
-    auto buildID = symbols->locateBuildID();
-    if (!buildID) {
-      LOG(ERROR) << "Failed to locate buildID";
-      return false;
-    }
-
-    auto cachePath = getPath(req, ent);
-    if (!cachePath.has_value()) {
-      LOG(ERROR) << "Failed to get cache path for " << req.type << ':'
-                 << req.func << ':' << req.arg << '/'
-                 << static_cast<size_t>(ent);
-      return false;
-    }
-
-    LOG(INFO) << "Loading cache " << *cachePath;
-    std::ifstream ifs(*cachePath);
-    boost::archive::text_iarchive ia(ifs);
-
-    std::string cacheBuildId;
-    ia >> cacheBuildId;
-    if (cacheBuildId != *buildID) {
-      LOG(ERROR) << "The cache's build id '" << cacheBuildId
-                 << "' doesn't match the target's build id '" << *buildID
-                 << "'";
-      return false;
-    }
-
-    ia >> data;
-    return true;
-  } catch (const std::exception& e) {
-    LOG(WARNING) << "Failed to load from cache: " << e.what();
-    return false;
-  }
-}
-
-template <typename T>
-bool OICache::store(const irequest& req, Entity ent, const T& data) {
-  if (!isEnabled())
-    return false;
-  try {
-    auto buildID = symbols->locateBuildID();
-    if (!buildID) {
-      LOG(ERROR) << "Failed to locate buildID";
-      return false;
-    }
-
-    auto cachePath = getPath(req, ent);
-    if (!cachePath.has_value()) {
-      LOG(ERROR) << "Failed to get cache path for " << req.type << ':'
-                 << req.func << ':' << req.arg << '/'
-                 << static_cast<size_t>(ent);
-      return false;
-    }
-
-    LOG(INFO) << "Storing cache " << *cachePath;
-    std::ofstream ofs(*cachePath);
-    boost::archive::text_oarchive oa(ofs);
-
-    oa << *buildID;
-    oa << data;
-    return true;
-  } catch (const std::exception& e) {
-    LOG(WARNING) << "Failed to write to cache: " << e.what();
-    return false;
-  }
-}
-
-#define INSTANTIATE_ARCHIVE(...)                                      \
-  template bool OICache::load(const irequest&, Entity, __VA_ARGS__&); \
-  template bool OICache::store(const irequest&, Entity, const __VA_ARGS__&);
-
-INSTANTIATE_ARCHIVE(std::pair<RootInfo, TypeHierarchy>)
-INSTANTIATE_ARCHIVE(std::unordered_map<std::string, std::shared_ptr<FuncDesc>>)
-INSTANTIATE_ARCHIVE(
-    std::unordered_map<std::string, std::shared_ptr<GlobalDesc>>)
-INSTANTIATE_ARCHIVE(std::map<std::string, PaddingInfo>)
-
-#undef INSTANTIATE_ARCHIVE
 
 // Upload all contents of cache for this request
 bool OICache::upload([[maybe_unused]] const irequest& req) {

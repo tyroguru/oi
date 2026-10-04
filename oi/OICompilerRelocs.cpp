@@ -157,10 +157,12 @@ class OIMemoryManager : public RTDyldMemoryManager {
 
   SmallVector<Slab, 4> Slabs{};
   OIMemoryManager(std::shared_ptr<SymbolService> ss,
-                  const std::unordered_map<std::string, uintptr_t>& synths)
+                  const std::unordered_map<std::string, uintptr_t>& synths,
+                  OICompiler::SymbolResolver res)
       : RTDyldMemoryManager{},
         symbols{std::move(ss)},
-        syntheticSymbols{synths} {
+        syntheticSymbols{synths},
+        resolver{std::move(res)} {
   }
 
   /* Hook to make LLVM call `reserveAllocationSpace()` for each Object file */
@@ -202,6 +204,7 @@ class OIMemoryManager : public RTDyldMemoryManager {
  private:
   std::shared_ptr<SymbolService> symbols;
   const std::unordered_map<std::string, uintptr_t>& syntheticSymbols;
+  OICompiler::SymbolResolver resolver;
 
   Slab& currentSlab() {
     assert(!Slabs.empty());
@@ -284,7 +287,12 @@ JITSymbol OIMemoryManager::findSymbol(const std::string& name) {
     return JITSymbol(synth->second, JITSymbolFlags::Exported);
   }
 
-  if (auto sym = symbols->locateSymbol(name)) {
+  if (resolver) {
+    if (auto addr = resolver(name)) {
+      VLOG(1) << "findSymbol(" << name << ") = " << std::hex << *addr;
+      return JITSymbol(*addr, JITSymbolFlags::Exported);
+    }
+  } else if (auto sym = symbols->locateSymbol(name)) {
     VLOG(1) << "findSymbol(" << name << ") = " << std::hex << sym->addr;
     return JITSymbol(sym->addr, JITSymbolFlags::Exported);
   }
@@ -381,10 +389,11 @@ static void debugDisAsm(
 std::optional<OICompiler::RelocResult> OICompiler::applyRelocs(
     uintptr_t baseRelocAddress,
     const std::set<fs::path>& objectFiles,
-    const std::unordered_map<std::string, uintptr_t>& syntheticSymbols) {
+    const std::unordered_map<std::string, uintptr_t>& syntheticSymbols,
+    SymbolResolver resolver) {
   metrics::Tracing relocationTracing("relocation");
 
-  memMgr = {new OIMemoryManager(symbols, syntheticSymbols),
+  memMgr = {new OIMemoryManager(symbols, syntheticSymbols, std::move(resolver)),
             [](OIMemoryManager* p) { delete p; }};
   RuntimeDyld dyld(*memMgr, *memMgr);
 

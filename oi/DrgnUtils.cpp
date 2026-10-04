@@ -29,7 +29,7 @@ void error::Deleter::operator()(drgn_error* err) noexcept {
 }
 
 const char* error::what() const noexcept {
-  return ptr->message;
+  return drgn_error_message(ptr.get());
 }
 
 program::program() {
@@ -120,13 +120,7 @@ std::string typeToName(drgn_type* type) {
   std::string typeName;
   if (drgn_type_has_tag(type)) {
     const char* typeTag = drgn_type_tag(type);
-    if (typeTag != nullptr) {
-      typeName = typeTag;
-    } else if (type->_private.oi_name != nullptr) {
-      typeName = type->_private.oi_name;
-    } else {
-      typeName = "";
-    }
+    typeName = typeTag != nullptr ? typeTag : "";
     // TODO: Lookup unnamed union in type->string flag
   } else if (drgn_type_has_name(type)) {
     typeName = drgn_type_name(type);

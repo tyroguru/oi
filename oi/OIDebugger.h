@@ -20,29 +20,37 @@
 #include <filesystem>
 #include <fstream>
 
+#include "oi/Features.h"
 #include "oi/OICache.h"
-#include "oi/OICodeGen.h"
+#include "oi/OICodeGenConfig.h"
 #include "oi/OICompiler.h"
 #include "oi/OIParser.h"
 #include "oi/SymbolService.h"
 #include "oi/TrapInfo.h"
-#include "oi/TreeBuilder.h"
 #include "oi/X86InstDefs.h"
 
 namespace oi::detail {
 
+// What oid does with the data it captures.
+struct OidOutputConfig {
+  FeatureSet features;
+  // Dump each argument's raw data segment instead of decoding it.
+  bool dumpDataSegment = false;
+  std::optional<std::string> jsonPath;
+};
+
 class OIDebugger {
-  OIDebugger(const OICodeGen::Config&, OICompiler::Config, TreeBuilder::Config);
+  OIDebugger(const OICodeGenConfig&, OICompiler::Config, OidOutputConfig);
 
  public:
   OIDebugger(pid_t,
-             const OICodeGen::Config&,
+             const OICodeGenConfig&,
              OICompiler::Config,
-             TreeBuilder::Config);
+             OidOutputConfig);
   OIDebugger(std::filesystem::path,
-             const OICodeGen::Config&,
+             const OICodeGenConfig&,
              OICompiler::Config,
-             TreeBuilder::Config);
+             OidOutputConfig);
 
   bool segmentInit(void);
   bool stopTarget(void);
@@ -105,9 +113,6 @@ class OIDebugger {
   void setHardDisableDrgn(bool val) {
     symbols->setHardDisableDrgn(val);
   }
-  void setStrict(bool val) {
-    treeBuilderConfig.strict = val;
-  }
 
   bool uploadCache() {
     return std::all_of(
@@ -131,17 +136,6 @@ class OIDebugger {
               });
         });
   };
-
-  std::pair<RootInfo, TypeHierarchy> getTreeBuilderTyping() {
-    assert(pdata.numReqs() == 1);
-    auto [type, th, _] = typeInfos.at(pdata.getReq().getReqForArg());
-    return {type, th};
-  };
-
-  std::map<std::string, PaddingInfo> getPaddingInfo() {
-    assert(pdata.numReqs() == 1);
-    return std::get<2>(typeInfos.at(pdata.getReq().getReqForArg()));
-  }
 
   void setCustomCodeFile(std::filesystem::path newCCT) {
     customCodeFile = std::move(newCCT);
@@ -189,10 +183,26 @@ class OIDebugger {
   std::unordered_map<pid_t, std::shared_ptr<trapInfo>> threadTrapState;
   std::unordered_map<uintptr_t, uintptr_t> replayInstMap;
 
-  std::unordered_map<
-      irequest,
-      std::tuple<RootInfo, TypeHierarchy, std::map<std::string, PaddingInfo>>>
-      typeInfos;
+  /*
+   * oid's own copy of the JIT code, relocated into this process. The data
+   * captured in the target is decoded with the tree builder instructions in
+   * this copy: they include functions (processors) as well as data, so oid
+   * needs the code too, not just the object file.
+   */
+  struct DecoderSegment {
+    void* addr = nullptr;
+    size_t size = 0;
+    DecoderSegment() = default;
+    DecoderSegment(const DecoderSegment&) = delete;
+    DecoderSegment& operator=(const DecoderSegment&) = delete;
+    ~DecoderSegment();
+  };
+  DecoderSegment decoderSeg;
+  OICompiler::RelocResult::SymTable decoderSymbols;
+  bool loadDecoder(OICompiler&,
+                   const std::set<std::filesystem::path>&,
+                   const std::unordered_map<std::string, uintptr_t>&);
+  std::optional<std::string> rootTypeName(const irequest&);
 
   template <typename Sys, typename... Args>
   std::optional<typename Sys::RetType> remoteSyscall(Args...);
@@ -241,8 +251,8 @@ class OIDebugger {
   bool contTargetThread(pid_t, unsigned long = 0) const;
 
   OICompiler::Config compilerConfig{};
-  const OICodeGen::Config& generatorConfig;
-  TreeBuilder::Config treeBuilderConfig{};
+  const OICodeGenConfig& generatorConfig;
+  OidOutputConfig outputConfig{};
   std::optional<std::string> generateCode(const irequest&);
 
   std::fstream segmentConfigFile;
@@ -297,7 +307,7 @@ class OIDebugger {
 #pragma GCC diagnostic pop
   };
 
-  bool decodeTargetData(const DataHeader&, std::vector<uint64_t>&) const;
+  bool checkDataHeader(const DataHeader&) const;
 
   static constexpr size_t prologueLength = 64;
   static constexpr size_t constLength = 64;

@@ -25,11 +25,15 @@
 #include <vector>
 
 #include "oi/Descs.h"
-#include "oi/TypeHierarchy.h"
 
 struct Dwfl;
 struct drgn_program;
 struct irequest;
+
+struct RootInfo {
+  std::string varName;
+  struct drgn_qualified_type type;
+};
 
 namespace oi::detail {
 

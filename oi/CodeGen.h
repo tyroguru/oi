@@ -29,7 +29,6 @@
 #include "type_graph/TypeGraph.h"
 
 struct drgn_type;
-struct TypeHierarchy;
 namespace oi::detail {
 class SymbolService;
 }
@@ -72,9 +71,6 @@ class CodeGen {
   bool codegenFromDrgn(struct drgn_type* drgnType,
                        std::string linkageName,
                        std::string& code);
-  void exportDrgnTypes(TypeHierarchy& th,
-                       std::list<drgn_type>& drgnTypes,
-                       drgn_type** rootType) const;
 
   bool registerContainers();
   void registerContainer(std::unique_ptr<ContainerInfo> containerInfo);

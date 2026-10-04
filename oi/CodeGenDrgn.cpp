@@ -19,10 +19,8 @@
 
 #include "CodeGen.h"
 #include "oi/SymbolService.h"
-#include "oi/TypeHierarchy.h"
 #include "type_graph/AddChildren.h"
 #include "type_graph/AlignmentCalc.h"
-#include "type_graph/DrgnExporter.h"
 #include "type_graph/DrgnParser.h"
 #include "type_graph/Flattener.h"
 #include "type_graph/IdentifyContainers.h"
@@ -32,8 +30,7 @@
 
 /*
  * This file holds every part of CodeGen which depends on drgn: parsing types
- * directly from DWARF (`addDrgnRoot`/`codegenFromDrgn`), exporting the type
- * graph back to drgn types (`exportDrgnTypes`, used by OICache), and the
+ * directly from DWARF (`addDrgnRoot`/`codegenFromDrgn`) and the
  * polymorphic-inheritance pass which re-parses a type's children via drgn.
  *
  * Keeping these out of CodeGen.cpp means consumers which only ever build a
@@ -81,17 +78,6 @@ bool CodeGen::codegenFromDrgn(struct drgn_type* drgnType,
   transform(typeGraph_);
   generate(typeGraph_, code, std::move(name));
   return true;
-}
-
-void CodeGen::exportDrgnTypes(TypeHierarchy& th,
-                              std::list<drgn_type>& drgnTypes,
-                              drgn_type** rootType) const {
-  assert(typeGraph_.rootTypes().size() == 1);
-
-  type_graph::DrgnExporter drgnExporter{th, drgnTypes};
-  for (auto& type : typeGraph_.rootTypes()) {
-    *rootType = drgnExporter.accept(type);
-  }
 }
 
 void CodeGen::addDrgnRoot(struct drgn_type* drgnType, TypeGraph& typeGraph) {

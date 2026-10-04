@@ -35,10 +35,8 @@ extern "C" {
 #include "oi/Metrics.h"
 #include "oi/OIDebugger.h"
 #include "oi/OIOpts.h"
-#include "oi/PaddingHunter.h"
 #include "oi/Portability.h"
 #include "oi/TimeUtils.h"
-#include "oi/TreeBuilder.h"
 
 #if OI_PORTABILITY_META_INTERNAL()
 #include <folly/init/Init.h>
@@ -178,9 +176,13 @@ constexpr static OIOpts opts{
         "dump-data-segment",
         no_argument,
         nullptr,
-        "Dump the data segment's content, before TreeBuilder processes it\n"
+        "Dump the data segment's content instead of decoding it\n"
         "Each argument gets its own dump file: 'dataseg.<oid-pid>.<arg>.dump'"},
-    OIOpt{'a', "log-all-structs", no_argument, nullptr, "Log all structures"},
+    OIOpt{'a',
+          "log-all-structs",
+          no_argument,
+          nullptr,
+          "No effect (TreeBuilder v1 only)"},
     OIOpt{'m',
           "mode",
           required_argument,
@@ -204,9 +206,7 @@ void usage() {
   std::cerr << "  prod    Disable drgn, enable remote caching, and chase raw "
                "pointers."
             << std::endl;
-  std::cerr << "  strict  Enable additional fatal error conditions such as "
-               "TreeBuilder reading too little data."
-            << std::endl;
+  std::cerr << "  strict  No effect (TreeBuilder v1 only)." << std::endl;
 
   std::cerr << "\n\tFor problem reporting, questions and general comments "
                "please pop along"
@@ -315,9 +315,9 @@ static ExitStatus::ExitStatus runScript(
     const std::string& fileName,
     std::istream& script,
     const Oid::Config& oidConfig,
-    const OICodeGen::Config& codeGenConfig,
+    const OICodeGenConfig& codeGenConfig,
     const OICompiler::Config& compilerConfig,
-    const TreeBuilder::Config& tbConfig) {
+    const OidOutputConfig& outputConfig) {
   if (!fileName.empty()) {
     VLOG(1) << "SCR FILE: " << fileName;
   }
@@ -327,10 +327,10 @@ static ExitStatus::ExitStatus runScript(
   std::shared_ptr<OIDebugger> oid;  // share oid with the global signal handler
   if (oidConfig.pid != 0) {
     oid = std::make_shared<OIDebugger>(
-        oidConfig.pid, codeGenConfig, compilerConfig, tbConfig);
+        oidConfig.pid, codeGenConfig, compilerConfig, outputConfig);
   } else {
     oid = std::make_shared<OIDebugger>(
-        oidConfig.debugInfoFile, codeGenConfig, compilerConfig, tbConfig);
+        oidConfig.debugInfoFile, codeGenConfig, compilerConfig, outputConfig);
   }
   weak_oid = oid;  // set the weak_ptr for signal handlers
 
@@ -345,7 +345,6 @@ static ExitStatus::ExitStatus runScript(
   }
   oid->setCustomCodeFile(oidConfig.customCodeFile);
   oid->setHardDisableDrgn(oidConfig.hardDisableDrgn);
-  oid->setStrict(oidConfig.strict);
 
   VLOG(1) << "OIDebugger constructor took " << std::dec
           << time_ns(time_hr::now() - progStart) << " nsecs";
@@ -418,15 +417,7 @@ static ExitStatus::ExitStatus runScript(
           << time_ns(time_hr::now() - compileStart) << " nsecs)";
 
   if (oidConfig.compAndExit) {
-    // Ensure the .th cache file also gets created
-    oid->getTreeBuilderTyping();
-
-    if (oidConfig.genPaddingStats) {
-      PaddingHunter paddingHunter;
-      paddingHunter.localPaddedStructs = oid->getPaddingInfo();
-      paddingHunter.processLocalPaddingInfo();
-      paddingHunter.outputPaddingInfo();
-    }
+    // Nothing more to do: the code is compiled (and cached, if enabled).
   } else {
     installSigHandlers();
 
@@ -515,12 +506,11 @@ int main(int argc, char* argv[]) {
 
   std::map<Feature, bool> features = {
       {Feature::PackStructs, true},
-      {Feature::GenPaddingStats, true},
       {Feature::TypeGraph, true},
+      {Feature::TreeBuilderV2, true},
       {Feature::PruneTypeGraph, true},
   };
 
-  bool logAllStructs = true;
   bool dumpDataSegment = false;
 
   metrics::Tracing _("main");
@@ -654,7 +644,6 @@ int main(int argc, char* argv[]) {
         oidConfig.removeMappings = true;
         break;
       case 'a':
-        logAllStructs = true;
         break;
       case 'B':
         dumpDataSegment = true;
@@ -705,12 +694,11 @@ int main(int argc, char* argv[]) {
 
   OICompiler::Config compilerConfig{};
 
-  OICodeGen::Config codeGenConfig;
+  OICodeGenConfig codeGenConfig;
   codeGenConfig.features = {};  // fill in after processing the config file
 
-  TreeBuilder::Config tbConfig{
+  OidOutputConfig outputConfig{
       .features = {},  // fill in after processing the config file
-      .logAllStructs = logAllStructs,
       .dumpDataSegment = dumpDataSegment,
       .jsonPath = jsonPath,
   };
@@ -722,7 +710,17 @@ int main(int argc, char* argv[]) {
   }
   compilerConfig.features = *featureSet;
   codeGenConfig.features = *featureSet;
-  tbConfig.features = *featureSet;
+  outputConfig.features = *featureSet;
+
+  // oid decodes its data with TreeBuilder v2 (the same as OIL), which needs
+  // CodeGen v2; TreeBuilder v1 and CodeGen v1 are gone.
+  for (auto required : {Feature::TypeGraph, Feature::TreeBuilderV2}) {
+    if (!(*featureSet)[required]) {
+      LOG(ERROR) << "oid requires the '" << featureToStr(required)
+                 << "' feature";
+      return ExitStatus::UsageError;
+    }
+  }
 
   if (!scriptFile.empty()) {
     if (!std::filesystem::exists(scriptFile)) {
@@ -730,15 +728,23 @@ int main(int argc, char* argv[]) {
       return ExitStatus::FileNotFoundError;
     }
     std::ifstream script(scriptFile);
-    auto status = runScript(
-        scriptFile, script, oidConfig, codeGenConfig, compilerConfig, tbConfig);
+    auto status = runScript(scriptFile,
+                            script,
+                            oidConfig,
+                            codeGenConfig,
+                            compilerConfig,
+                            outputConfig);
     if (status != ExitStatus::Success) {
       return status;
     }
   } else if (!scriptSource.empty()) {
     std::istringstream script(scriptSource);
-    auto status = runScript(
-        scriptFile, script, oidConfig, codeGenConfig, compilerConfig, tbConfig);
+    auto status = runScript(scriptFile,
+                            script,
+                            oidConfig,
+                            codeGenConfig,
+                            compilerConfig,
+                            outputConfig);
     if (status != ExitStatus::Success) {
       return status;
     }

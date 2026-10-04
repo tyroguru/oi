@@ -1600,8 +1600,13 @@ void CodeGen::generateIntrospectRoot(std::string& code,
       },
       rootName);
 
-  if (config_.features[Feature::TreeBuilderV2]) {
+  if (config_.features[Feature::TreeBuilderV2] &&
+      config_.features[Feature::Library]) {
     FuncGen::DefineTopLevelIntrospect(code, typeToHash, rootTypeAlias);
+  } else if (config_.features[Feature::TreeBuilderV2]) {
+    // oid: capture into the target's data segment.
+    FuncGen::DefineTopLevelGetSizeDataSegment(
+        code, typeToHash, rootTypeAlias, config_.features);
   } else {
     // Unreachable from oilgen (TreeBuilderV2 is always enabled there - see
     // OIGenerator::generate()'s featuresMap); this is oid's path, with a

@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <cassert>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,7 +24,12 @@
 #include "oi/arch/Arch.h"
 
 extern "C" {
+// libdw.h must come before drgn.h, which only declares its DWARF DIE
+// functions (e.g. drgn_object_locator_init()) when libdw.h is included.
+// clang-format off
+#include <elfutils/libdw.h>
 #include <drgn.h>
+// clang-format on
 }
 
 struct FuncDesc {
@@ -111,7 +117,7 @@ struct FuncDesc {
 
   struct Arg final : virtual TargetObject {
     uint8_t index;
-    drgn_object_locator locator;
+    drgn_object_locator locator{};
 
     ~Arg() final {
       drgn_object_locator_deinit(&locator);
