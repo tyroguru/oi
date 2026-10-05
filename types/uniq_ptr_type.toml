@@ -36,17 +36,20 @@ void getSizeType(const %1%<T,Deleter> &u_ptr, size_t& returnArg)
 """
 
 traversal_func = """
-auto tail = returnArg.write((uintptr_t)container.get());
+// One snapshot of the pointer (see oi_snapshot): the target may change it
+// while it is captured.
+auto* p = oi_snapshot(container.get());
+auto tail = returnArg.write((uintptr_t)p);
 
 if constexpr (!oi_is_complete<T0>) {
   return tail.template delegate<0>(std::identity());
 } else {
-  bool do_visit = container && ctx.pointers.add((uintptr_t)container.get());
+  bool do_visit = p && ctx.pointers.add((uintptr_t)p);
   if (!do_visit)
     return tail.template delegate<0>(std::identity());
 
-  return tail.template delegate<1>([&ctx, &container](auto ret) {
-    return OIInternal::getSizeType<Ctx>(ctx, *container, ret);
+  return tail.template delegate<1>([&ctx, p](auto ret) {
+    return OIInternal::getSizeType<Ctx>(ctx, *p, ret);
   });
 }
 """
