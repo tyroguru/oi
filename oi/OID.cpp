@@ -450,10 +450,11 @@ static ExitStatus::ExitStatus runScript(
     /*
      * Function probes write their breakpoints through /proc/<pid>/mem, so
      * the threads are seized but none is stopped. A global variable probe
-     * hijacks the main thread, which must be stopped for that.
+     * runs the capture code on the main thread: only that thread is seized,
+     * and stopped.
      */
     const bool globalProbe = oid->isGlobalDataProbeEnabled();
-    if (!(globalProbe ? oid->stopTarget() : oid->attachThreads())) {
+    if (!(globalProbe ? oid->stopMainThread() : oid->attachThreads())) {
       LOG(ERROR) << "Couldn't stop target process with PID " << oidConfig.pid;
       return ExitStatus::StopTargetError;
     }
@@ -466,9 +467,8 @@ static ExitStatus::ExitStatus runScript(
       return ExitStatus::PatchingError;
     }
 
-    if (globalProbe) {
-      oid->contTargetThread(false);
-    }
+    // (A global probe's processGlobal() has already resumed the main thread,
+    // into the capture code.)
 
     if (oidConfig.timeout_s > 0) {
       alarm(oidConfig.timeout_s);
