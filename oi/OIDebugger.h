@@ -63,6 +63,10 @@ class OIDebugger {
    * them.
    */
   bool attachThreads(void);
+  /* Seize and stop only the main thread: for a global variable probe. */
+  bool stopMainThread(void);
+  /* Put a thread that is in the capture code back where it was trapped. */
+  bool abandonCapture(pid_t);
   /*
    * Whether segmentInit() needs a stopped target thread: to map the
    * segments with remote syscalls, or set up JIT logging. Not when this
