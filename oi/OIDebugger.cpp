@@ -115,7 +115,9 @@ bool OIDebugger::patchFunctions(void) {
        * processGlobal() - this function should do everything apart from
        * continue the target thread.
        */
-      processGlobal(preq.func);
+      if (!processGlobal(preq.func)) {
+        return false;
+      }
     } else {
       if (!functionPatch(preq)) {
         LOG(ERROR) << "Failed to patch function";
@@ -951,56 +953,57 @@ OIDebugger::processTrapRet OIDebugger::processJitCodeRet(
  * in this case) and introspect the global data. It would be good if we had
  * a cheap way of asserting that the global thread is stopped.
  */
-bool OIDebugger::processGlobal(const std::string& varName) {
-  assert(mode == OID_MODE_THREAD);
+bool OIDebugger::stopMainThread(void) {
+  /*
+   * A global probe runs the capture code on the main thread, so only that
+   * thread is traced: seized (no SIGSTOP, unlike PTRACE_ATTACH) and
+   * interrupted. It's in threadList so that the trap loop waits for the
+   * capture code's return and restoreState() detaches it.
+   */
+  if (ptrace(PTRACE_SEIZE, traceePid, nullptr, nullptr) < 0) {
+    LOG(ERROR) << "Couldn't seize target pid " << traceePid << ": "
+               << strerror(errno);
+    return false;
+  }
+  threadList.push_back(traceePid);
 
+  if (ptrace(PTRACE_INTERRUPT, traceePid, nullptr, nullptr) < 0) {
+    LOG(ERROR) << "Couldn't interrupt target pid " << traceePid << ": "
+               << strerror(errno);
+    return false;
+  }
+  int status = 0;
+  if (waitpid(traceePid, &status, __WALL) != traceePid || !WIFSTOPPED(status)) {
+    LOG(ERROR) << "Target pid " << traceePid << " didn't stop";
+    return false;
+  }
+  return true;
+}
+
+/*
+ * Run the capture code for a global variable on the main thread, which
+ * stopMainThread() stopped at an arbitrary point: in its own code, or in a
+ * system call (then interrupted, with a restart pending). Its registers are
+ * saved, and restored when the capture code returns (processJitCodeRet), so
+ * that it carries on as if nothing had happened; an interrupted system call
+ * is then restarted by the kernel as for any ptrace stop.
+ */
+bool OIDebugger::processGlobal(const std::string& varName) {
   VLOG(1) << "Introspecting global variable: " << varName;
 
-  errno = 0;
-  if (ptrace(PTRACE_SYSCALL, traceePid, nullptr, nullptr) < 0) {
-    LOG(ERROR) << "Couldn't attach to target pid " << traceePid
-               << " (Reason: " << strerror(errno) << ")";
-    return false;
-  }
-
-  VLOG(1) << "About to wait for process on syscall entry/exit";
-  int status = 0;
-  waitpid(traceePid, &status, 0);
-
-  if (!WIFSTOPPED(status)) {
-    LOG(ERROR) << "process not stopped!";
-  }
-
-  errno = 0;
   struct user_regs_struct regs {};
   if (ptrace(PTRACE_GETREGS, traceePid, nullptr, &regs) < 0) {
-    LOG(ERROR) << "processGlobal: failed to read registers" << strerror(errno);
+    LOG(ERROR) << "processGlobal: failed to read registers: "
+               << strerror(errno);
     return false;
   }
-
-  errno = 0;
   struct user_fpregs_struct fpregs {};
   if (ptrace(PTRACE_GETFPREGS, traceePid, nullptr, &fpregs) < 0) {
-    LOG(ERROR) << "processGlobal: Couldn't get fp registers: "
+    LOG(ERROR) << "processGlobal: failed to read fp registers: "
                << strerror(errno);
+    return false;
   }
-
-  dumpRegs("After syscall stop", traceePid, &regs);
-
-  auto t = std::make_shared<trapInfo>(OID_TRAP_JITCODERET,
-                                      GLOBAL_VARIABLE_TRAP_ADDR);
-  t->lifetime.rename("global_jit");
-  threadTrapState.emplace(traceePid, t);
-
-  regs.rip -= 2;
-  /* Save interrupted registers into trap information */
-  memcpy((void*)&t->savedRegs, (void*)&regs, sizeof(t->savedRegs));
-
-  /* Save fpregs into trap information */
-  memcpy((void*)&t->savedFPregs, (void*)&fpregs, sizeof(t->savedFPregs));
-  regs.rip = segConfig.textSegBase;
-
-  dumpRegs("processGlobal2", traceePid, &regs);
+  dumpRegs("processGlobal stopped", traceePid, &regs);
 
   /*
    * Get the variable address and push it into the target process patch area.
@@ -1010,7 +1013,6 @@ bool OIDebugger::processGlobal(const std::string& varName) {
     LOG(ERROR) << "processGlobal: failed to get global's address!";
     return false;
   }
-
   uint64_t addr = sym->addr;
 
   auto gd = symbols->findGlobalDesc(varName);
@@ -1018,30 +1020,42 @@ bool OIDebugger::processGlobal(const std::string& varName) {
     LOG(ERROR) << "processGlobal: failed to find GlobalDesc!";
     return false;
   }
-
   auto remoteObjAddr = remoteObjAddrs.find(gd);
   if (remoteObjAddr == remoteObjAddrs.end()) {
     LOG(ERROR) << "processGlobal: no remote object addr for " << varName;
     return false;
   }
-
   if (!writeTargetMemory(
           (void*)&addr, (void*)remoteObjAddr->second, sizeof(addr))) {
     LOG(ERROR) << "processGlobal: writeTargetMemory remoteObjAddr failed!";
+    return false;
   }
-
   VLOG(1) << varName << " addr: " << std::hex << addr;
 
-  /* Main target thread should already be stopped */
+  auto t = std::make_shared<trapInfo>(OID_TRAP_JITCODERET,
+                                      GLOBAL_VARIABLE_TRAP_ADDR);
+  t->lifetime.rename("global_jit");
+  memcpy((void*)&t->savedRegs, (void*)&regs, sizeof(t->savedRegs));
+  memcpy((void*)&t->savedFPregs, (void*)&fpregs, sizeof(t->savedFPregs));
+  threadTrapState.insert_or_assign(traceePid, t);
 
-  errno = 0;
+  /*
+   * Enter the prologue (which calls the capture code) with a stack that is
+   * safe to use: below the 128-byte red zone, which the interrupted code may
+   * be using, and 16-byte aligned for the call. orig_rax = -1: if the thread
+   * was in a system call, the kernel mustn't restart it into the prologue
+   * (the saved registers, restored later, restart it where it was).
+   */
+  regs.rip = segConfig.textSegBase;
+  regs.rsp = (regs.rsp - 128) & ~uintptr_t{15};
+  regs.orig_rax = static_cast<unsigned long long>(-1);
   if (ptrace(PTRACE_SETREGS, traceePid, nullptr, &regs) < 0) {
-    LOG(ERROR) << "Execute: Couldn't restore registers: " << strerror(errno);
+    LOG(ERROR) << "processGlobal: couldn't set registers: " << strerror(errno);
+    threadTrapState.erase(traceePid);
+    return false;
   }
 
-  contTargetThread(traceePid);
-
-  return true;
+  return contTargetThread(traceePid);
 }
 
 bool OIDebugger::canProcessTrapForThread(pid_t thread_pid) const {
@@ -2669,6 +2683,33 @@ std::optional<int> OIDebugger::stopForDetach(pid_t p) {
   }
 }
 
+/*
+ * If the thread is in the capture code (it has trap state), restore the
+ * registers it had when it was trapped, so that it carries on with its own
+ * code; the capture is abandoned. For a function probe that is the
+ * instruction under the (by now removed) breakpoint; a global probe's saved
+ * registers are where the thread was interrupted. Returns whether it was.
+ */
+bool OIDebugger::abandonCapture(pid_t p) {
+  auto iter = threadTrapState.find(p);
+  if (iter == threadTrapState.end()) {
+    return false;
+  }
+  const auto& t = iter->second;
+  auto regs = t->savedRegs;
+  auto fpregs = t->savedFPregs;
+  if (t->trapAddr != GLOBAL_VARIABLE_TRAP_ADDR) {
+    regs.rip -= sizeofInt3;
+  }
+  if (ptrace(PTRACE_SETREGS, p, nullptr, &regs) < 0 ||
+      ptrace(PTRACE_SETFPREGS, p, nullptr, &fpregs) < 0) {
+    LOG(ERROR) << "Couldn't restore thread " << p << ": " << strerror(errno);
+  }
+  VLOG(1) << "Thread " << p << " was in the capture code: restored";
+  threadTrapState.erase(iter);
+  return true;
+}
+
 void OIDebugger::restoreState(void) {
   /*
    * We are about to detach from the target process.
@@ -2725,6 +2766,15 @@ void OIDebugger::restoreState(void) {
       }
       detachSignal = static_cast<unsigned long>(*sig);
 
+      /*
+       * Interrupted in the capture code (oid was stopped mid-capture): put
+       * the thread back where it was trapped. Its stop may be the capture
+       * code's own return trap: no signal.
+       */
+      if (abandonCapture(p)) {
+        detachSignal = 0;
+      }
+
       VLOG(1) << "Stopped PID : " << p;
     } else if (WSTOPSIG(status) == SIGTRAP) {
       VLOG(1) << "Thread already stopped PID : " << p << " signal is "
@@ -2769,49 +2819,9 @@ void OIDebugger::restoreState(void) {
 
       struct user_regs_struct regs {};
 
-      /* Find the trapInfo for this tgid */
-      if (auto iter{threadTrapState.find(p)};
-          iter != std::end(threadTrapState)) {
-        auto t{iter->second};
-
-        /* Paranoia really */
-        assert(p == iter->first);
-
-        struct user_fpregs_struct fpregs {};
-
-        if (VLOG_IS_ON(1)) {
-          errno = 0;
-          if (ptrace(PTRACE_GETREGS, p, NULL, &regs) < 0) {
-            LOG(ERROR) << "restoreState failed to read registers: "
-                       << strerror(errno);
-          }
-          dumpRegs("Before1", p, &regs);
-        }
-
-        memcpy((void*)&regs, (void*)&t->savedRegs, sizeof(regs));
-        memcpy((void*)&fpregs, (void*)&t->savedFPregs, sizeof(fpregs));
-
-        /*
-         * Note that we need to rewind the original %rip as it has trapped
-         * on an INT3 (which has now been replaced by the original
-         * instruction.
-         */
-        regs.rip -= sizeofInt3;
-
-        errno = 0;
-        if (ptrace(PTRACE_SETREGS, p, NULL, &regs) < 0) {
-          LOG(ERROR) << "restoreState: Couldn't restore registers: "
-                     << strerror(errno);
-        }
-        dumpRegs("After1", p, &regs);
-
-        errno = 0;
-        if (ptrace(PTRACE_SETFPREGS, p, NULL, &fpregs) < 0) {
-          LOG(ERROR) << "restorState: Couldn't restore fp registers: "
-                     << strerror(errno);
-        }
-
-        VLOG(1) << "Set registers for pid " << std::dec << iter->first;
+      /* In the capture code, or trapped into it: put it back. */
+      if (abandonCapture(p)) {
+        VLOG(1) << "Set registers for pid " << std::dec << p;
       } else {
         /*
          * If no trapinfo exists for this thread then it must have just trapped
