@@ -16,6 +16,7 @@
 #include "oi/OIDebugger.h"
 
 #include <algorithm>
+#include <array>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/split.hpp>
@@ -909,7 +910,25 @@ OIDebugger::processTrapRet OIDebugger::processJitCodeRet(
 
     jitTrapProcessTime.stop();
 
-    contTargetThread(pid);
+    /*
+     * The capture is done and the thread is back on its own code. If none of
+     * the target's code has a breakpoint of ours left (always so for an entry
+     * probe, whose breakpoint was removed when it was hit; not for a return
+     * probe with other return sites), detach the thread now rather than
+     * continue it: it would otherwise be stopped again just to be detached.
+     */
+    if (!targetTrapsActive() &&
+        !generatorConfig.features[Feature::JitLogging]) {
+      if (ptrace(PTRACE_DETACH, pid, nullptr, nullptr) == 0) {
+        threadList.erase(std::remove(threadList.begin(), threadList.end(), pid),
+                         threadList.end());
+      } else {
+        LOG(ERROR) << "Couldn't detach pid " << pid << ": " << strerror(errno);
+        contTargetThread(pid);
+      }
+    } else {
+      contTargetThread(pid);
+    }
 
     if (++count == 1 || isInterrupted()) {
       VLOG(1) << "count: " << count << " oid done";
@@ -1316,12 +1335,13 @@ OIDebugger::processTrapRet OIDebugger::processTrap(pid_t pid,
         } else {
           ret = processFuncTrap(*tInfo, newpid, regs, fpregs);
         }
-      } else {
-        LOG(ERROR) << "Error! SIGTRAP: " << std::hex << bpaddr
-                   << " No activeTraps entry found, resuming thread "
-                   << std::dec << newpid;
-
-        // Resuming at the breakpoint
+      } else if (insertedTrapAddrs.contains(bpaddr)) {
+        /*
+         * One of our breakpoints, hit just before it was removed: resume the
+         * thread on the original instruction, which is back in place.
+         */
+        VLOG(1) << "SIGTRAP at removed breakpoint " << std::hex << bpaddr
+                << ": resuming thread " << std::dec << newpid << " there";
         regs.rip = bpaddr;
 
         errno = 0;
@@ -1331,6 +1351,11 @@ OIDebugger::processTrapRet OIDebugger::processTrap(pid_t pid,
         }
 
         contTargetThread(newpid);
+      } else {
+        // Not ours: deliver it.
+        VLOG(1) << "SIGTRAP at " << std::hex << bpaddr
+                << " is not ours: passing it on to " << std::dec << newpid;
+        contTargetThread(newpid, SIGTRAP);
       }
 
       break;
@@ -1647,17 +1672,19 @@ bool OIDebugger::functionPatch(const prequest& req) {
     return false;
   }
 
-  /* 5. Insert the traps in the target process */
+  /*
+   * 5. Insert the traps in the target process. Through /proc/<pid>/mem, so
+   * that no thread needs to be stopped to do it.
+   */
   for (const auto& trap : tiVec) {
     VLOG(1) << "Patching function " << req.func << " @"
             << (void*)trap->trapAddr;
     activeTraps.emplace(trap->trapAddr, trap);
+    insertedTrapAddrs.insert(trap->trapAddr);
 
-    errno = 0;
-    if (ptrace(PTRACE_POKETEXT, traceePid, trap->trapAddr, trap->patchedText) <
-        0) {
+    if (!writeTextByte(trap->trapAddr, trap->patchedTextBytes[0])) {
       /* We'll let our cleanup handling restore the original instructions */
-      LOG(ERROR) << "functionPatch POKETEXT failed: " << strerror(errno);
+      LOG(ERROR) << "functionPatch: failed to write the breakpoint";
       return false;
     }
   }
@@ -1910,25 +1937,39 @@ bool OIDebugger::unmapSegments(bool deleteSegConfFile) {
  * The calling thread *must* be stopped before calling this interface.
  * Unfortunately there is no cheap way to assert this.
  */
+bool OIDebugger::writeTextByte(uintptr_t addr, uint8_t value) {
+  if (targetMem.fd < 0) {
+    auto path = "/proc/" + std::to_string(traceePid) + "/mem";
+    targetMem.fd = open(path.c_str(), O_RDWR | O_CLOEXEC);
+    if (targetMem.fd < 0) {
+      PLOG(ERROR) << "Failed to open " << path;
+      return false;
+    }
+  }
+
+  // The kernel writes through the read-only text mapping (as for
+  // PTRACE_POKETEXT): no thread of the target needs to be stopped. Only the
+  // first byte changes, so a thread executing there sees either instruction.
+  auto ret = pwrite(targetMem.fd, &value, 1, static_cast<off_t>(addr));
+  if (ret != 1) {
+    PLOG(ERROR) << "Failed to write the target's text at " << std::hex << addr;
+    return false;
+  }
+  return true;
+}
+
 bool OIDebugger::removeTraps(pid_t pid) {
   metrics::Tracing removeTrapsTracing("remove_traps");
 
   pid_t targetPid = pid ? pid : traceePid;
 
-  /* Hijack the main thread to remove the traps and flush the JIT logs */
-  errno = 0;
-  if (ptrace(PTRACE_INTERRUPT, targetPid, nullptr, nullptr) < 0) {
-    LOG(ERROR) << "Couldn't interrupt target pid " << targetPid << ": "
-               << strerror(errno);
-    return false;
-  }
-
-  errno = 0;
-  if (waitpid(targetPid, 0, WSTOPPED) != targetPid) {
-    LOG(ERROR) << "Failed to stop the target pid " << targetPid << ": "
-               << strerror(errno);
-  }
-
+  /*
+   * Restore the instructions under the breakpoints that are still in place
+   * (none, once a probe has fired: its trap is removed when it is hit). This
+   * writes through /proc/<pid>/mem, so it no longer interrupts a thread of
+   * the target.
+   */
+  bool ret = true;
   for (auto it = activeTraps.begin(); it != activeTraps.end();) {
     const auto& tInfo = it->second;
 
@@ -1938,23 +1979,22 @@ bool OIDebugger::removeTraps(pid_t pid) {
       continue;
     }
 
-    VLOG(1) << "removeTraps removing int3 at " << std::hex << tInfo->trapAddr;
+    VLOG(1) << "removeTraps removing int3 at " << std::hex << tInfo->trapAddr
+            << " in " << std::dec << targetPid;
 
-    errno = 0;
-    if (ptrace(PTRACE_POKETEXT, targetPid, tInfo->trapAddr, tInfo->origText) <
-        0) {
-      LOG(ERROR) << "Execute: Couldn't poke text: " << strerror(errno);
+    if (!writeTextByte(tInfo->trapAddr, tInfo->origTextBytes[0])) {
+      ret = false;
     }
 
     it = activeTraps.erase(it);
   }
 
-  /* Resume the main thread now, so it doesn't have to wait on restoreState */
-  if (!contTargetThread(targetPid)) {
-    return false;
-  }
-
-  return true;
+  /*
+   * A thread may have executed one of these breakpoints just before it was
+   * removed and not yet reported it: restoreState() deals with that (see
+   * stopForDetach()).
+   */
+  return ret;
 }
 
 bool OIDebugger::removeTrap(pid_t pid, const trapInfo& t) {
@@ -2537,6 +2577,98 @@ std::optional<std::string> OIDebugger::rootTypeName(const irequest& req) {
 }
 
 /* TODO: Needs some cleanup and generally making more resilient */
+bool OIDebugger::targetTrapsActive() const {
+  return std::any_of(activeTraps.begin(), activeTraps.end(), [](const auto& t) {
+    return t.second->trapKind != OID_TRAP_JITCODERET;
+  });
+}
+
+bool OIDebugger::sigtrapPending(pid_t tid) const {
+  /*
+   * A breakpoint's SIGTRAP is queued for the thread itself. The thread is
+   * stopped here, so read its queue directly: one call, where reading its
+   * SigPnd from /proc would cost several microseconds of its stop.
+   */
+  std::array<siginfo_t, 16> pending{};
+  struct __ptrace_peeksiginfo_args args {
+    .off = 0, .flags = 0, .nr = static_cast<int32_t>(pending.size()),
+  };
+  long n = ptrace(PTRACE_PEEKSIGINFO, tid, &args, pending.data());
+  if (n < 0) {
+    LOG(ERROR) << "PTRACE_PEEKSIGINFO failed for " << tid << ": "
+               << strerror(errno);
+    return false;
+  }
+  return std::any_of(
+      pending.begin(), pending.begin() + n, [](const siginfo_t& si) {
+        return si.si_signo == SIGTRAP;
+      });
+}
+
+/*
+ * A thread can have executed one of our breakpoints just before it was
+ * removed and not yet reported it. Its SIGTRAP is then pending behind the
+ * stop that PTRACE_INTERRUPT causes: the kernel reports a ptrace trap before
+ * it dequeues signals. Detached at that stop, the thread would get the
+ * SIGTRAP with no tracer, and die; detached at the SIGTRAP's own stop as it
+ * is, it would resume one byte into the instruction the breakpoint replaced.
+ * So let it take the pending SIGTRAP, rewind it onto that instruction (now
+ * restored) and detach it with no signal. Signals that aren't ours are passed
+ * on at detach.
+ */
+std::optional<int> OIDebugger::stopForDetach(pid_t p) {
+  if (ptrace(PTRACE_INTERRUPT, p, NULL, NULL) < 0) {
+    VLOG(1) << "Couldn't interrupt target pid " << p
+            << " (Reason: " << strerror(errno) << ")";
+    return std::nullopt;
+  }
+
+  int status = 0;
+  for (;;) {
+    if (waitpid(p, &status, __WALL) != p) {
+      LOG(ERROR) << "failed to wait for process " << p
+                 << " (Reason: " << strerror(errno) << ")";
+      return std::nullopt;
+    }
+    if (!WIFSTOPPED(status)) {
+      return std::nullopt;  // exited
+    }
+
+    int sig = WSTOPSIG(status);
+    if (status >> 16 != 0) {
+      // A ptrace event stop (ours, from PTRACE_INTERRUPT, or a group stop).
+      if (!sigtrapPending(p)) {
+        return 0;
+      }
+      VLOG(1) << "Thread " << p << " has a pending SIGTRAP: letting it in";
+      ptrace(PTRACE_CONT, p, nullptr, nullptr);
+      continue;
+    }
+
+    if (sig == SIGTRAP) {
+      struct user_regs_struct regs {};
+      if (ptrace(PTRACE_GETREGS, p, nullptr, &regs) == 0 &&
+          insertedTrapAddrs.contains(regs.rip - sizeofInt3)) {
+        VLOG(1) << "Thread " << p << " hit a removed breakpoint at " << std::hex
+                << regs.rip - sizeofInt3 << ": rewinding it";
+        regs.rip -= sizeofInt3;
+        if (ptrace(PTRACE_SETREGS, p, nullptr, &regs) < 0) {
+          LOG(ERROR) << "Couldn't rewind thread " << p << ": "
+                     << strerror(errno);
+        }
+        return 0;
+      }
+    }
+
+    // A signal that isn't ours. If our SIGTRAP is also pending, deliver this
+    // one now and wait for the SIGTRAP; otherwise pass it on at detach.
+    if (!sigtrapPending(p)) {
+      return sig;
+    }
+    ptrace(PTRACE_CONT, p, nullptr, sig);
+  }
+}
+
 void OIDebugger::restoreState(void) {
   /*
    * We are about to detach from the target process.
@@ -2567,6 +2699,7 @@ void OIDebugger::restoreState(void) {
     auto state = getTaskState(p);
     VLOG(1) << "Task " << p << " state: " << taskStateToString(state) << " ("
             << static_cast<int>(state) << ")";
+    unsigned long detachSignal = 0;
     pid_t ret = waitpid(p, &status, WNOHANG | WSTOPPED);
     if (ret < 0) {
       LOG(ERROR) << "Error in waitpid (pid " << p << ")" << strerror(errno);
@@ -2586,16 +2719,11 @@ void OIDebugger::restoreState(void) {
       }
       VLOG(1) << "Stopping PID : " << p;
 
-      if (ptrace(PTRACE_INTERRUPT, p, NULL, NULL) < 0) {
-        VLOG(1) << "Couldn't interrupt target pid " << p
-                << " (Reason: " << strerror(errno) << ")";
+      auto sig = stopForDetach(p);
+      if (!sig.has_value()) {
+        continue;  // the thread has gone
       }
-      VLOG(1) << "Waiting to stop PID : " << p;
-
-      if (waitpid(p, 0, WSTOPPED) != p) {
-        LOG(ERROR) << "failed to wait for process " << p
-                   << " (Reason: " << strerror(errno) << ")";
-      }
+      detachSignal = static_cast<unsigned long>(*sig);
 
       VLOG(1) << "Stopped PID : " << p;
     } else if (WSTOPSIG(status) == SIGTRAP) {
@@ -2700,16 +2828,21 @@ void OIDebugger::restoreState(void) {
                      << strerror(errno);
         }
 
-        dumpRegs("Before2", p, &regs);
-        regs.rip -= sizeofInt3;
-        dumpRegs("After2", p, &regs);
+        if (insertedTrapAddrs.contains(regs.rip - sizeofInt3)) {
+          dumpRegs("Before2", p, &regs);
+          regs.rip -= sizeofInt3;
+          dumpRegs("After2", p, &regs);
 
-        errno = 0;
-        if (ptrace(PTRACE_SETREGS, p, NULL, &regs) < 0) {
-          LOG(ERROR) << "restoreState SIGTRAP handling: setregs failed - "
-                     << strerror(errno);
+          errno = 0;
+          if (ptrace(PTRACE_SETREGS, p, NULL, &regs) < 0) {
+            LOG(ERROR) << "restoreState SIGTRAP handling: setregs failed - "
+                       << strerror(errno);
+          }
+          VLOG(1) << "Set registers for thread " << std::dec << p;
+        } else {
+          // Not one of our breakpoints: pass the SIGTRAP on.
+          detachSignal = SIGTRAP;
         }
-        VLOG(1) << "Set registers for thread " << std::dec << p;
       }
     } else {
       LOG(WARNING) << "Thread " << p
@@ -2739,7 +2872,7 @@ void OIDebugger::restoreState(void) {
     if (!cleanupLogFile())
       LOG(ERROR) << "failed to cleanup log file!";
 
-    if (ptrace(PTRACE_DETACH, p, 0L, 0L) < 0) {
+    if (ptrace(PTRACE_DETACH, p, 0L, detachSignal) < 0) {
       LOG(ERROR) << "restoreState Couldn't detach target pid " << p
                  << " (Reason: " << strerror(errno) << ")";
     } else {
@@ -2803,6 +2936,16 @@ bool OIDebugger::targetAttach() {
   }
 
   return true;
+}
+
+bool OIDebugger::segmentInitNeedsThread(void) const {
+  return !segConfig.existingConfig || segConfig.dataSegSize != dataSegSize ||
+         generatorConfig.features[Feature::JitLogging];
+}
+
+bool OIDebugger::attachThreads(void) {
+  assert(traceePid > 0 && mode == OID_MODE_FUNC);
+  return targetAttach();
 }
 
 bool OIDebugger::stopTarget(void) {

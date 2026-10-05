@@ -16,9 +16,12 @@
 #pragma once
 
 #include <glog/logging.h>
+#include <unistd.h>
 
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <set>
 
 #include "oi/Features.h"
 #include "oi/OICache.h"
@@ -54,6 +57,18 @@ class OIDebugger {
 
   bool segmentInit(void);
   bool stopTarget(void);
+  /*
+   * Seize all the target's threads without stopping any: enough to write
+   * the breakpoints (via /proc/<pid>/mem) and catch the threads that hit
+   * them.
+   */
+  bool attachThreads(void);
+  /*
+   * Whether segmentInit() needs a stopped target thread: to map the
+   * segments with remote syscalls, or set up JIT logging. Not when this
+   * process's segments already exist, at the right size.
+   */
+  bool segmentInitNeedsThread(void) const;
   bool interruptTarget(void);
   bool compileCode();
   bool processTargetData();
@@ -79,6 +94,20 @@ class OIDebugger {
   void stopAll();
   bool removeTraps(pid_t);
   bool removeTrap(pid_t, const trapInfo&);
+  /*
+   * Write the first byte of the instruction at addr through /proc/<pid>/mem,
+   * which needs no thread of the target to be stopped.
+   */
+  bool writeTextByte(uintptr_t addr, uint8_t value);
+  /*
+   * Interrupt a running thread so that it can be detached, dealing with a
+   * breakpoint it may have hit and not yet reported. Returns the signal to
+   * detach it with, or nothing if it is gone.
+   */
+  std::optional<int> stopForDetach(pid_t);
+  bool sigtrapPending(pid_t) const;
+  /* Whether any of the target's own code still has a breakpoint of ours. */
+  bool targetTrapsActive() const;
   void enableDrgn();
   bool unmapSegments(bool deleteSegConf = false);
   bool isInterrupted(void) const {
@@ -173,6 +202,21 @@ class OIDebugger {
   const int replayInstSize = 512;
   bool trapsRemoved{false};
   std::shared_ptr<SymbolService> symbols;
+  /*
+   * Every breakpoint address written into the target's code, including those
+   * since removed: a thread that executed one just before its removal can
+   * report it later, and must then be rewound onto the original instruction.
+   */
+  std::set<uintptr_t> insertedTrapAddrs;
+
+  struct TargetMem {
+    int fd = -1;
+    ~TargetMem() {
+      if (fd >= 0) {
+        close(fd);
+      }
+    }
+  } targetMem;
   OICache cache;
 
   /*
