@@ -953,6 +953,47 @@ OIDebugger::processTrapRet OIDebugger::processJitCodeRet(
  * in this case) and introspect the global data. It would be good if we had
  * a cheap way of asserting that the global thread is stopped.
  */
+/*
+ * Look up each global variable probed and write its address into the
+ * prologue, before the main thread is stopped: the lookup (symbol table and
+ * debug info) took most of oid's time in the stop. Nothing runs the prologue
+ * until processGlobal() sends the thread there, so writing it now is safe.
+ */
+bool OIDebugger::prepareGlobals(void) {
+  for (const auto& preq : pdata) {
+    if (preq.type != "global") {
+      continue;
+    }
+    const auto& varName = preq.func;
+
+    auto sym = symbols->locateSymbol(varName);
+    if (!sym.has_value()) {
+      LOG(ERROR) << "prepareGlobals: failed to get " << varName
+                 << "'s address!";
+      return false;
+    }
+    uint64_t addr = sym->addr;
+
+    auto gd = symbols->findGlobalDesc(varName);
+    if (!gd) {
+      LOG(ERROR) << "prepareGlobals: failed to find GlobalDesc for " << varName;
+      return false;
+    }
+    auto remoteObjAddr = remoteObjAddrs.find(gd);
+    if (remoteObjAddr == remoteObjAddrs.end()) {
+      LOG(ERROR) << "prepareGlobals: no remote object addr for " << varName;
+      return false;
+    }
+    if (!writeTargetMemory(
+            (void*)&addr, (void*)remoteObjAddr->second, sizeof(addr))) {
+      LOG(ERROR) << "prepareGlobals: writeTargetMemory remoteObjAddr failed!";
+      return false;
+    }
+    VLOG(1) << varName << " addr: " << std::hex << addr;
+  }
+  return true;
+}
+
 bool OIDebugger::stopMainThread(void) {
   /*
    * A global probe runs the capture code on the main thread, so only that
@@ -1005,32 +1046,7 @@ bool OIDebugger::processGlobal(const std::string& varName) {
   }
   dumpRegs("processGlobal stopped", traceePid, &regs);
 
-  /*
-   * Get the variable address and push it into the target process patch area.
-   */
-  auto sym = symbols->locateSymbol(varName);
-  if (!sym.has_value()) {
-    LOG(ERROR) << "processGlobal: failed to get global's address!";
-    return false;
-  }
-  uint64_t addr = sym->addr;
-
-  auto gd = symbols->findGlobalDesc(varName);
-  if (!gd) {
-    LOG(ERROR) << "processGlobal: failed to find GlobalDesc!";
-    return false;
-  }
-  auto remoteObjAddr = remoteObjAddrs.find(gd);
-  if (remoteObjAddr == remoteObjAddrs.end()) {
-    LOG(ERROR) << "processGlobal: no remote object addr for " << varName;
-    return false;
-  }
-  if (!writeTargetMemory(
-          (void*)&addr, (void*)remoteObjAddr->second, sizeof(addr))) {
-    LOG(ERROR) << "processGlobal: writeTargetMemory remoteObjAddr failed!";
-    return false;
-  }
-  VLOG(1) << varName << " addr: " << std::hex << addr;
+  // The variable's address is already in the prologue: prepareGlobals().
 
   auto t = std::make_shared<trapInfo>(OID_TRAP_JITCODERET,
                                       GLOBAL_VARIABLE_TRAP_ADDR);
