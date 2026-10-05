@@ -605,7 +605,7 @@ else()
 endif()
 
 ### Object Introspection Debugger (OID)
-add_executable(oid oi/OID.cpp oi/OIDebugger.cpp)
+add_executable(oid oi/OID.cpp oi/OIDebugger.cpp oi/Timeline.cpp)
 # oid relocates its JIT code into itself too, to decode the captured data; the
 # code's references to OI's own result types are resolved with dlsym().
 set_target_properties(oid PROPERTIES ENABLE_EXPORTS ON)

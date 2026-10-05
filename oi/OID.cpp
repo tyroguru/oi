@@ -37,6 +37,7 @@ extern "C" {
 #include "oi/OIOpts.h"
 #include "oi/Portability.h"
 #include "oi/TimeUtils.h"
+#include "oi/Timeline.h"
 
 #if OI_PORTABILITY_META_INTERNAL()
 #include <folly/init/Init.h>
@@ -356,6 +357,7 @@ static ExitStatus::ExitStatus runScript(
     return ExitStatus::ScriptParsingError;
   }
 
+  timeline::mark("attach");
   if (oidConfig.attachToProcess && !oid->stopTarget()) {
     LOG(ERROR) << "Couldn't stop target process with PID " << oidConfig.pid;
     return ExitStatus::StopTargetError;
@@ -391,6 +393,7 @@ static ExitStatus::ExitStatus runScript(
       oid->setDataSegmentSize(oidConfig.dataSegSize);
     }
 
+    timeline::mark("segment_init");
     if (!oid->segmentInit()) {
       oid->contTargetThread();
       LOG(ERROR) << "Failed to initialise segments in target process with PID "
@@ -401,6 +404,7 @@ static ExitStatus::ExitStatus runScript(
     // continue and detach main thread
     oid->contTargetThread();
   }
+  timeline::mark("init_done");
 
   VLOG(1) << "init took " << std::dec << time_ns(time_hr::now() - initStart)
           << " nsecs\n"
@@ -412,6 +416,7 @@ static ExitStatus::ExitStatus runScript(
     LOG(ERROR) << "Compilation failed";
     return ExitStatus::CompilationError;
   }
+  timeline::mark("compile_done");
 
   VLOG(1) << "Compilation Finished (" << std::dec
           << time_ns(time_hr::now() - compileStart) << " nsecs)";
@@ -434,11 +439,13 @@ static ExitStatus::ExitStatus runScript(
      * under patchFunctions and therefore leave the shape of the code at
      * this level pretty much unaltered.
      */
+    timeline::mark("insert");
     if (!oid->stopTarget()) {
       LOG(ERROR) << "Couldn't stop target process with PID " << oidConfig.pid;
       return ExitStatus::StopTargetError;
     }
 
+    timeline::mark("patch");
     if (!oid->patchFunctions()) {
       oid->contTargetThread();
       LOG(ERROR) << "Error patching functions";
@@ -446,6 +453,7 @@ static ExitStatus::ExitStatus runScript(
     }
 
     oid->contTargetThread(false);
+    timeline::mark("wait_trap");
 
     if (oidConfig.timeout_s > 0) {
       alarm(oidConfig.timeout_s);
@@ -461,18 +469,22 @@ static ExitStatus::ExitStatus runScript(
     alarm(0);
 
     // Cleanup all the remaining traps that were injected
+    timeline::mark("remove_traps");
     if (!oid->removeTraps(0)) {
       LOG(ERROR) << "Failed to remove instrumentation...";
     }
 
     {  // Resume stopped thread before cleanup
+      timeline::mark("resume_threads");
       VLOG(1) << "Resuming stopped threads...";
       metrics::Tracing __("resume_threads");
       while (oid->processTrap(oidConfig.pid, false) == OIDebugger::OID_CONT) {
       }
     }
 
+    timeline::mark("restore_state");
     oid->restoreState();
+    timeline::mark("detached");
 
     if (!oid->isInterrupted() && !oid->processTargetData()) {
       LOG(ERROR) << "Problems processing target data";

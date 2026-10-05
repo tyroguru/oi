@@ -53,6 +53,7 @@ extern "C" {
 #include "oi/OILexer.h"
 #include "oi/Portability.h"
 #include "oi/Syscall.h"
+#include "oi/Timeline.h"
 #include "oi/exporters/Json.h"
 #include "oi/exporters/inst.h"
 #include "oi/result/SizedResult.h"
@@ -62,6 +63,69 @@ extern "C" {
 #if OI_PORTABILITY_META_INTERNAL()
 #include "object-introspection/internal/GobsService.h"
 #endif
+
+/*
+ * Every call oid makes that stops, resumes or reads/writes the target goes
+ * through these, so that the timeline (OID_TIMELINE, see oi/Timeline.h) can
+ * show how long oid keeps the target's threads stopped, and doing what.
+ */
+namespace {
+namespace timeline = oi::detail::timeline;
+
+long timedPtrace(int request, pid_t pid, void* addr, void* data) {
+  if (!timeline::enabled()) {
+    return ::ptrace(static_cast<__ptrace_request>(request), pid, addr, data);
+  }
+  auto start = timeline::now();
+  long ret = ::ptrace(static_cast<__ptrace_request>(request), pid, addr, data);
+  int savedErrno = errno;
+  timeline::record("ptrace", request, pid, start, timeline::now(), ret);
+  errno = savedErrno;
+  return ret;
+}
+
+pid_t timedWaitpid(pid_t pid, int* status, int options) {
+  if (!timeline::enabled()) {
+    return ::waitpid(pid, status, options);
+  }
+  auto start = timeline::now();
+  pid_t ret = ::waitpid(pid, status, options);
+  int savedErrno = errno;
+  timeline::record("waitpid", options, pid, start, timeline::now(), ret);
+  errno = savedErrno;
+  return ret;
+}
+
+template <auto Fn>
+ssize_t timedProcessVm(const char* what,
+                       pid_t pid,
+                       const struct iovec* local,
+                       unsigned long liovcnt,
+                       const struct iovec* remote,
+                       unsigned long riovcnt,
+                       unsigned long flags) {
+  if (!timeline::enabled()) {
+    return Fn(pid, local, liovcnt, remote, riovcnt, flags);
+  }
+  auto start = timeline::now();
+  ssize_t ret = Fn(pid, local, liovcnt, remote, riovcnt, flags);
+  int savedErrno = errno;
+  timeline::record(what, 0, pid, start, timeline::now(), ret);
+  errno = savedErrno;
+  return ret;
+}
+}  // namespace
+
+#define ptrace(request, pid, addr, data)                  \
+  timedPtrace((request),                                  \
+              (pid),                                      \
+              reinterpret_cast<void*>((uintptr_t)(addr)), \
+              reinterpret_cast<void*>((uintptr_t)(data)))
+#define waitpid(pid, status, options) timedWaitpid((pid), (status), (options))
+#define process_vm_readv(...) \
+  timedProcessVm<::process_vm_readv>("process_vm_readv", __VA_ARGS__)
+#define process_vm_writev(...) \
+  timedProcessVm<::process_vm_writev>("process_vm_writev", __VA_ARGS__)
 
 using namespace std;
 
@@ -2537,7 +2601,7 @@ void OIDebugger::restoreState(void) {
 
           VLOG(1) << "New child being created!! pid " << std::dec << childPid;
 
-          if (ptrace(PTRACE_DETACH, childPid, 0L, 0L) < 0) {
+          if (ptrace(PTRACE_DETACH, static_cast<pid_t>(childPid), 0L, 0L) < 0) {
             LOG(ERROR) << "Couldn't detach target pid " << childPid
                        << " (Reason: " << strerror(errno) << ")";
           } else {
