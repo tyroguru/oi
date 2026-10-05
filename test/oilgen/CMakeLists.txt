@@ -184,3 +184,8 @@ add_oilgen_aot_test(oilgen_aot_list_capture_scaling
   AotListCaptureScaling.cpp
   FEATURES capture-bytes chase-raw-pointers
 )
+
+add_oilgen_aot_test(oilgen_aot_pointer_race
+  AotPointerRace.cpp
+  FEATURES chase-raw-pointers
+)

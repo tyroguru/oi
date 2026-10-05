@@ -720,6 +720,17 @@ void FuncGen::DefineBasicTypeHandlers(std::string& code, FeatureSet features) {
   code += R"(
 template <typename Ctx, typename T>
 struct TypeHandler;
+
+// A pointer in the target can change while it is being captured: oid captures
+// without the target's locks. Take one snapshot of it and use only that, so
+// that the value checked for null is the value that is followed. The empty asm
+// makes the copy opaque, so the compiler can't replace uses of it with fresh
+// loads from the target's memory.
+template <typename P>
+inline P oi_snapshot(P p) {
+  asm volatile("" : "+r"(p));
+  return p;
+}
 )";
 
   code += "constexpr bool oi_capture_bytes = ";
@@ -850,14 +861,15 @@ struct TypeHandler {
   static types::st::Unit<DB> getSizeType(
       Ctx& ctx, const T& t, typename TypeHandler<Ctx, T>::type returnArg) {
     if constexpr (std::is_pointer_v<T>) {
+      const T p = oi_snapshot(t);
       JLOG("ptr val @");
-      JLOGPTR(t);
-      auto r0 = returnArg.write((uintptr_t)t);
-      if (t && ctx.pointers.add((uintptr_t)t)) {
-        return r0.template delegate<1>([&ctx, &t](auto ret) {
+      JLOGPTR(p);
+      auto r0 = returnArg.write((uintptr_t)p);
+      if (p && ctx.pointers.add((uintptr_t)p)) {
+        return r0.template delegate<1>([&ctx, p](auto ret) {
           using U = std::decay_t<std::remove_pointer_t<T>>;
           if constexpr (oi_is_complete<U>) {
-            return TypeHandler<Ctx, U>::getSizeType(ctx, *t, ret);
+            return TypeHandler<Ctx, U>::getSizeType(ctx, *p, ret);
           } else {
             return ret;
           }
