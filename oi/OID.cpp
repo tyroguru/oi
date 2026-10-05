@@ -356,7 +356,20 @@ static ExitStatus::ExitStatus runScript(
     return ExitStatus::ScriptParsingError;
   }
 
-  if (oidConfig.attachToProcess && !oid->stopTarget()) {
+  if (oidConfig.attachToProcess && oidConfig.dataSegSize > 0) {
+    oid->setDataSegmentSize(oidConfig.dataSegSize);
+  }
+
+  /*
+   * A stopped thread is needed only to map oid's segments (remote syscalls)
+   * or remove them. When this process's segments already exist, at the right
+   * size, don't stop it at all.
+   */
+  const bool initNeedsThread =
+      oidConfig.attachToProcess &&
+      (oidConfig.removeMappings || oid->segmentInitNeedsThread());
+
+  if (initNeedsThread && !oid->stopTarget()) {
     LOG(ERROR) << "Couldn't stop target process with PID " << oidConfig.pid;
     return ExitStatus::StopTargetError;
   }
@@ -387,19 +400,19 @@ static ExitStatus::ExitStatus runScript(
       return ret;
     }
 
-    if (oidConfig.dataSegSize > 0) {
-      oid->setDataSegmentSize(oidConfig.dataSegSize);
-    }
-
     if (!oid->segmentInit()) {
-      oid->contTargetThread();
+      if (initNeedsThread) {
+        oid->contTargetThread();
+      }
       LOG(ERROR) << "Failed to initialise segments in target process with PID "
                  << oidConfig.pid;
       return ExitStatus::SegmentInitError;
     }
 
     // continue and detach main thread
-    oid->contTargetThread();
+    if (initNeedsThread) {
+      oid->contTargetThread();
+    }
   }
 
   VLOG(1) << "init took " << std::dec << time_ns(time_hr::now() - initStart)
@@ -434,18 +447,28 @@ static ExitStatus::ExitStatus runScript(
      * under patchFunctions and therefore leave the shape of the code at
      * this level pretty much unaltered.
      */
-    if (!oid->stopTarget()) {
+    /*
+     * Function probes write their breakpoints through /proc/<pid>/mem, so
+     * the threads are seized but none is stopped. A global variable probe
+     * hijacks the main thread, which must be stopped for that.
+     */
+    const bool globalProbe = oid->isGlobalDataProbeEnabled();
+    if (!(globalProbe ? oid->stopTarget() : oid->attachThreads())) {
       LOG(ERROR) << "Couldn't stop target process with PID " << oidConfig.pid;
       return ExitStatus::StopTargetError;
     }
 
     if (!oid->patchFunctions()) {
-      oid->contTargetThread();
+      if (globalProbe) {
+        oid->contTargetThread();
+      }
       LOG(ERROR) << "Error patching functions";
       return ExitStatus::PatchingError;
     }
 
-    oid->contTargetThread(false);
+    if (globalProbe) {
+      oid->contTargetThread(false);
+    }
 
     if (oidConfig.timeout_s > 0) {
       alarm(oidConfig.timeout_s);
