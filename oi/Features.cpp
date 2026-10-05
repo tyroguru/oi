@@ -54,6 +54,9 @@ std::optional<std::string_view> featureHelp(Feature f) {
       return "Log information from the JIT code for debugging.";
     case Feature::PolymorphicInheritance:
       return "Follow polymorphic inheritance hierarchies in the probed object.";
+    case Feature::ValidatePointers:
+      return "oid: follow a pointer only if it is aligned and points into "
+             "readable memory of the target (its mappings at capture time).";
     case Feature::JitTiming:
       return "Instrument the JIT code with timing for performance testing.";
 

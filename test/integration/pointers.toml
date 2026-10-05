@@ -193,6 +193,54 @@ definitions = '''
         {"name":"c", "typeNames":["void*"], "staticSize":8, "exclusiveSize":8, "size":8, "capacity":1, "length":0}
       ]
     }]'''
+  [cases.struct_primitive_ptrs_invalid_unmapped]
+    oil_disable = "OIL doesn't validate pointers: following this one faults"
+    # Aligned, but below mmap_min_addr, so never mapped: oid's validate-pointers doesn't follow it.
+    param_types = ["const PrimitivePtrs&"]
+    setup = "return PrimitivePtrs{0, reinterpret_cast<int*>(0x1000), nullptr};"
+    features = ["chase-raw-pointers"]
+    expect_json_v2 = '''[{
+      "staticSize":24,
+      "exclusiveSize":4,
+      "size":24,
+      "members":[
+        {"name":"a", "typeNames":["int32_t"], "staticSize":4, "exclusiveSize":4, "size":4},
+        {"name":"b", "typeNames":["int32_t*"], "staticSize":8, "exclusiveSize":8, "size":8, "capacity":1, "length":0},
+        {"name":"c", "typeNames":["void*"], "staticSize":8, "exclusiveSize":8, "size":8, "capacity":1, "length":0}
+      ]
+    }]'''
+  [cases.struct_primitive_ptrs_invalid_misaligned]
+    oil_disable = "OIL doesn't validate pointers: following this one faults"
+    # In readable memory, but misaligned for an int: oid's validate-pointers doesn't follow it.
+    param_types = ["const PrimitivePtrs&"]
+    setup = "return PrimitivePtrs{0, reinterpret_cast<int*>(reinterpret_cast<char*>(new int[2]) + 1), nullptr};"
+    features = ["chase-raw-pointers"]
+    expect_json_v2 = '''[{
+      "staticSize":24,
+      "exclusiveSize":4,
+      "size":24,
+      "members":[
+        {"name":"a", "typeNames":["int32_t"], "staticSize":4, "exclusiveSize":4, "size":4},
+        {"name":"b", "typeNames":["int32_t*"], "staticSize":8, "exclusiveSize":8, "size":8, "capacity":1, "length":0},
+        {"name":"c", "typeNames":["void*"], "staticSize":8, "exclusiveSize":8, "size":8, "capacity":1, "length":0}
+      ]
+    }]'''
+  [cases.struct_primitive_ptrs_invalid_one]
+    oil_disable = "OIL doesn't validate pointers: following this one faults"
+    # The value nginx's timer field held when oid faulted: oid's validate-pointers doesn't follow it.
+    param_types = ["const PrimitivePtrs&"]
+    setup = "return PrimitivePtrs{0, reinterpret_cast<int*>(1), nullptr};"
+    features = ["chase-raw-pointers"]
+    expect_json_v2 = '''[{
+      "staticSize":24,
+      "exclusiveSize":4,
+      "size":24,
+      "members":[
+        {"name":"a", "typeNames":["int32_t"], "staticSize":4, "exclusiveSize":4, "size":4},
+        {"name":"b", "typeNames":["int32_t*"], "staticSize":8, "exclusiveSize":8, "size":8, "capacity":1, "length":0},
+        {"name":"c", "typeNames":["void*"], "staticSize":8, "exclusiveSize":8, "size":8, "capacity":1, "length":0}
+      ]
+    }]'''
 
 
   [cases.struct_vector_ptr]

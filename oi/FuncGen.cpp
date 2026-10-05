@@ -147,6 +147,7 @@ void FuncGen::DeclareExterns(std::string& code) {
 extern uint8_t* dataBase;
 extern size_t dataSize;
 extern uintptr_t cookieValue;
+extern uintptr_t oiValidRanges[];
   )";
   code.append(vars);
 }
@@ -733,6 +734,52 @@ inline P oi_snapshot(P p) {
 }
 )";
 
+  if (features[Feature::ValidatePointers] && !features[Feature::Library]) {
+    code += R"(
+// oid captures without the target's locks, so a pointer can hold a value that
+// was never an address (e.g., a field being reused). Follow a pointer only if
+// it is aligned for its type and the object lies inside one of the target's
+// readable mappings. oid writes them to oiValidRanges when the probe fires:
+// [0] counts the pointers rejected here, [1] is the number n of ranges, then
+// n sorted, disjoint [start, end) pairs. With n == 0, only alignment is
+// checked.
+template <typename U>
+inline bool oi_pointer_valid(const void* ptr) {
+  const uintptr_t a = reinterpret_cast<uintptr_t>(ptr);
+  uintptr_t size = 1, align = 1;
+  if constexpr (oi_is_complete<U> && !std::is_function_v<U>) {
+    size = sizeof(U);
+    align = alignof(U);
+  }
+  bool ok = a % align == 0;
+  const uintptr_t n = oiValidRanges[1];
+  if (ok && n != 0) {
+    const uintptr_t* r = &oiValidRanges[2];
+    // The first range whose end is above a.
+    uintptr_t lo = 0, hi = n;
+    while (lo < hi) {
+      uintptr_t mid = lo + (hi - lo) / 2;
+      if (r[2 * mid + 1] <= a)
+        lo = mid + 1;
+      else
+        hi = mid;
+    }
+    ok = lo < n && r[2 * lo] <= a && size <= r[2 * lo + 1] - a;
+  }
+  if (!ok)
+    ++oiValidRanges[0];
+  return ok;
+}
+)";
+  } else {
+    code += R"(
+template <typename U>
+inline bool oi_pointer_valid(const void*) {
+  return true;
+}
+)";
+  }
+
   code += "constexpr bool oi_capture_bytes = ";
   code += (features[Feature::CaptureBytes] ? "true" : "false");
   code += ";\n";
@@ -865,9 +912,9 @@ struct TypeHandler {
       JLOG("ptr val @");
       JLOGPTR(p);
       auto r0 = returnArg.write((uintptr_t)p);
-      if (p && ctx.pointers.add((uintptr_t)p)) {
+      using U = std::decay_t<std::remove_pointer_t<T>>;
+      if (p && oi_pointer_valid<U>(p) && ctx.pointers.add((uintptr_t)p)) {
         return r0.template delegate<1>([&ctx, p](auto ret) {
-          using U = std::decay_t<std::remove_pointer_t<T>>;
           if constexpr (oi_is_complete<U>) {
             return TypeHandler<Ctx, U>::getSizeType(ctx, *p, ret);
           } else {
