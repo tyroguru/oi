@@ -63,6 +63,11 @@ class OIDebugger {
    * them.
    */
   bool attachThreads(void);
+  /*
+   * Look up the global variables probed and write their addresses into the
+   * prologue, before any thread is stopped.
+   */
+  bool prepareGlobals(void);
   /* Seize and stop only the main thread: for a global variable probe. */
   bool stopMainThread(void);
   /* Put a thread that is in the capture code back where it was trapped. */

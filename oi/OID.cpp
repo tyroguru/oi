@@ -454,6 +454,10 @@ static ExitStatus::ExitStatus runScript(
      * and stopped.
      */
     const bool globalProbe = oid->isGlobalDataProbeEnabled();
+    if (globalProbe && !oid->prepareGlobals()) {
+      LOG(ERROR) << "Couldn't prepare the global variable probe";
+      return ExitStatus::PatchingError;
+    }
     if (!(globalProbe ? oid->stopMainThread() : oid->attachThreads())) {
       LOG(ERROR) << "Couldn't stop target process with PID " << oidConfig.pid;
       return ExitStatus::StopTargetError;
