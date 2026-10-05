@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <numeric>
 #include <span>
 
@@ -606,6 +607,81 @@ bool OIDebugger::replayTrappedInstr(const trapInfo& t,
   }
 
   return true;
+}
+
+size_t OIDebugger::validRangesBytes() const {
+  if (!generatorConfig.features[Feature::ValidatePointers]) {
+    return 0;
+  }
+  // Room for 4094 ranges, taking no more than a quarter of the segment.
+  return std::min<size_t>(64 * 1024, dataSegSize / 4) & ~size_t{15};
+}
+
+/*
+ * Write the target's readable mappings, merged and sorted, into the tail of
+ * the data segment for the JIT code to check pointers against.
+ *
+ * This runs before the probe is inserted, while the target runs: generating
+ * /proc/<pid>/maps costs about 1us per mapping, which would otherwise be added
+ * to the time the probed thread is stopped. So the ranges can be stale by the
+ * time the probe fires. A mapping created since is only a pointer rejected (and
+ * counted); one removed since can still fault, as without validation.
+ */
+bool OIDebugger::writeValidRanges() {
+  const size_t bytes = validRangesBytes();
+  if (bytes == 0) {
+    return true;
+  }
+  metrics::Tracing _("write_valid_ranges");
+  const auto startTime = std::chrono::steady_clock::now();
+
+  // [0]: rejected pointers (counted by the JIT code), [1]: n, then n pairs.
+  std::vector<uintptr_t> words{0, 0};
+  const size_t capacity = (bytes / sizeof(uintptr_t) - 2) / 2;
+
+  std::ifstream maps{"/proc/" + std::to_string(traceePid) + "/maps"};
+  if (!maps) {
+    LOG(ERROR) << "Failed to open the maps of " << traceePid;
+    return false;
+  }
+  std::string line;
+  while (std::getline(maps, line)) {
+    uintptr_t start = 0, end = 0;
+    char perms[5] = {};
+    if (sscanf(line.c_str(), "%lx-%lx %4s", &start, &end, perms) != 3 ||
+        perms[0] != 'r') {
+      continue;
+    }
+    // Readable, but reading some of their pages faults.
+    if (line.ends_with("[vvar]") || line.ends_with("[vvar_vclock]")) {
+      continue;
+    }
+    if (words.size() > 2 && words.back() == start) {
+      words.back() = end;  // adjacent to the previous range: merge
+    } else {
+      words.push_back(start);
+      words.push_back(end);
+    }
+  }
+
+  size_t n = (words.size() - 2) / 2;
+  if (n > capacity) {
+    LOG(WARNING) << "The target has " << n << " readable ranges, more than "
+                 << capacity << ": only checking pointers' alignment";
+    words.resize(2);
+    n = 0;
+  }
+  words[1] = n;
+
+  bool ok = writeTargetMemory(words.data(),
+                              reinterpret_cast<void*>(validRangesAddr()),
+                              words.size() * sizeof(uintptr_t));
+  VLOG(1) << "Pointer validation: wrote " << n << " readable ranges in "
+          << std::chrono::duration_cast<std::chrono::nanoseconds>(
+                 std::chrono::steady_clock::now() - startTime)
+                 .count()
+          << " nsecs";
+  return ok;
 }
 
 bool OIDebugger::locateObjectsAddresses(const trapInfo& tInfo,
@@ -2273,6 +2349,7 @@ bool OIDebugger::compileCode() {
         {"dataSize", segConfig.constStart + 1 * sizeof(uintptr_t)},
         {"cookieValue", segConfig.constStart + 2 * sizeof(uintptr_t)},
         {"logFile", segConfig.constStart + 3 * sizeof(uintptr_t)},
+        {"oiValidRanges", validRangesAddr()},
     };
 
     VLOG(2) << "Relocating...";
@@ -2315,9 +2392,11 @@ bool OIDebugger::compileCode() {
       return false;
     }
 
-    if (!writeTargetMemory(&dataSegSize,
+    // The JIT code mustn't write its results over the valid ranges.
+    size_t resultsSize = dataSegSize - validRangesBytes();
+    if (!writeTargetMemory(&resultsSize,
                            (void*)syntheticSymbols["dataSize"],
-                           sizeof(dataSegSize))) {
+                           sizeof(resultsSize))) {
       LOG(ERROR) << "Failed to write dataSegSize in probe's dataSize";
       return false;
     }
@@ -2334,6 +2413,11 @@ bool OIDebugger::compileCode() {
     if (!writeTargetMemory(
             &logFile, (void*)syntheticSymbols["logFile"], sizeof(logFile))) {
       LOG(ERROR) << "Failed to write logFile in probe's cookieValue";
+      return false;
+    }
+
+    if (!writeValidRanges()) {
+      LOG(ERROR) << "Failed to write the target's readable ranges";
       return false;
     }
 
@@ -2895,6 +2979,12 @@ bool OIDebugger::processTargetData() {
   }
 
   auto res = reinterpret_cast<uintptr_t>(buf.data());
+
+  if (const size_t bytes = validRangesBytes(); bytes != 0) {
+    uintptr_t rejected = 0;
+    std::memcpy(&rejected, buf.data() + dataSegSize - bytes, sizeof(rejected));
+    LOG(INFO) << "Pointers rejected by validation: " << rejected;
+  }
 
   assert(pdata.numReqs() == 1);
   const auto& preq = pdata.getReq();

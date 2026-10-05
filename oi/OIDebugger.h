@@ -236,6 +236,17 @@ class OIDebugger {
                           struct user_regs_struct&,
                           struct user_fpregs_struct&) const;
   bool locateObjectsAddresses(const trapInfo&, struct user_regs_struct&);
+
+  /*
+   * The tail of the data segment holds the target's readable mappings, for
+   * the JIT code's pointer validation (validate-pointers): see
+   * FuncGen::DefineBasicTypeHandlers' oi_pointer_valid for its layout.
+   */
+  size_t validRangesBytes() const;
+  uintptr_t validRangesAddr() const {
+    return segConfig.dataSegBase + dataSegSize - validRangesBytes();
+  }
+  bool writeValidRanges();
   processTrapRet processFuncTrap(const trapInfo&,
                                  pid_t,
                                  struct user_regs_struct&,

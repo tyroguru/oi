@@ -509,6 +509,7 @@ int main(int argc, char* argv[]) {
       {Feature::TypeGraph, true},
       {Feature::TreeBuilderV2, true},
       {Feature::PruneTypeGraph, true},
+      {Feature::ValidatePointers, true},
   };
 
   bool dumpDataSegment = false;

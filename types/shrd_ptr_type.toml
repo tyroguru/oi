@@ -43,7 +43,8 @@ auto tail = returnArg.write((uintptr_t)p);
 if constexpr (!oi_is_complete<T0>) {
   return tail.template delegate<0>(std::identity());
 } else {
-  bool do_visit = p && ctx.pointers.add((uintptr_t)p);
+  bool do_visit =
+      p && oi_pointer_valid<T0>(p) && ctx.pointers.add((uintptr_t)p);
   if (!do_visit)
     return tail.template delegate<0>(std::identity());
 

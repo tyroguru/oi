@@ -22,20 +22,21 @@
 
 #include "oi/EnumBitset.h"
 
-#define OI_FEATURE_LIST                         \
-  X(ChaseRawPointers, "chase-raw-pointers")     \
-  X(PackStructs, "pack-structs")                \
-  X(GenPaddingStats, "gen-padding-stats")       \
-  X(CaptureThriftIsset, "capture-thrift-isset") \
-  X(TypeGraph, "type-graph")                    \
-  X(PruneTypeGraph, "prune-type-graph")         \
-  X(Library, "library")                         \
-  X(TreeBuilderV2, "tree-builder-v2")           \
-  X(CaptureBytes, "capture-bytes")              \
-  X(GenJitDebug, "gen-jit-debug")               \
-  X(JitLogging, "jit-logging")                  \
-  X(JitTiming, "jit-timing")                    \
-  X(PolymorphicInheritance, "polymorphic-inheritance")
+#define OI_FEATURE_LIST                                \
+  X(ChaseRawPointers, "chase-raw-pointers")            \
+  X(PackStructs, "pack-structs")                       \
+  X(GenPaddingStats, "gen-padding-stats")              \
+  X(CaptureThriftIsset, "capture-thrift-isset")        \
+  X(TypeGraph, "type-graph")                           \
+  X(PruneTypeGraph, "prune-type-graph")                \
+  X(Library, "library")                                \
+  X(TreeBuilderV2, "tree-builder-v2")                  \
+  X(CaptureBytes, "capture-bytes")                     \
+  X(GenJitDebug, "gen-jit-debug")                      \
+  X(JitLogging, "jit-logging")                         \
+  X(JitTiming, "jit-timing")                           \
+  X(PolymorphicInheritance, "polymorphic-inheritance") \
+  X(ValidatePointers, "validate-pointers")
 
 namespace oi::detail {
 
