@@ -52,6 +52,25 @@ struct Repeat {
 };
 
 struct Field {
+  // A class member: its byte offset within the enclosing class
+  template <size_t N0, size_t N1, size_t N2>
+  constexpr Field(size_t static_size_,
+                  size_t exclusive_size_,
+                  std::string_view name_,
+                  const std::array<std::string_view, N0>& type_names_,
+                  const std::array<Field, N1>& fields_,
+                  const std::array<ProcessorInst, N2>& processors_,
+                  bool is_primitive_,
+                  size_t offset_)
+      : Field(static_size_,
+              exclusive_size_,
+              name_,
+              type_names_,
+              fields_,
+              processors_,
+              is_primitive_) {
+    offset = offset_;
+  }
   template <size_t N0, size_t N1, size_t N2>
   constexpr Field(size_t static_size_,
                   size_t exclusive_size_,
@@ -84,6 +103,8 @@ struct Field {
   std::span<const Field> fields;
   std::span<const ProcessorInst> processors;
   bool is_primitive;
+  // Byte offset within the enclosing class, for class members only
+  std::optional<size_t> offset;
 };
 
 template <size_t N0, size_t N1, size_t N2>

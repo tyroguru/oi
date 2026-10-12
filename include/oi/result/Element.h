@@ -64,6 +64,10 @@ struct Element {
   std::span<const std::string_view> type_names;
   size_t static_size;
   size_t exclusive_size;
+  // For a class member: its byte offset within the enclosing class (for a
+  // bitfield, the byte holding its first bit). Unset for the root, container
+  // elements and pointees, whose position comes from their parent.
+  std::optional<size_t> offset;
 
   std::optional<uintptr_t> pointer;
   std::variant<std::nullopt_t, Pointer, Scalar, std::string, Bytes> data = {
