@@ -167,6 +167,8 @@ inline void Json::printFields(const result::Element& el,
   printListField("typeNames", el.type_names, indent);
   printUnsignedField("staticSize", el.static_size, indent);
   printUnsignedField("exclusiveSize", el.exclusive_size, indent);
+  if (el.offset.has_value())
+    printUnsignedField("offset", *el.offset, indent);
   if (!el.va_intervals.empty())
     printVAIntervalsField(el.va_intervals, indent);
   if (el.pointer.has_value())

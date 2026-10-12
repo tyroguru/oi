@@ -76,6 +76,7 @@ IntrospectionResult::const_iterator::operator++() {
                 .type_names = ty.type_names,
                 .static_size = ty.static_size,
                 .exclusive_size = ty.exclusive_size,
+                .offset = ty.offset,
                 .container_stats = std::nullopt,
                 .is_set_stats = std::nullopt,
                 .is_primitive = ty.is_primitive,

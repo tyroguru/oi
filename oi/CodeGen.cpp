@@ -932,6 +932,10 @@ void CodeGen::genClassTreeBuilderInstructions(const Class& c,
     code += "::processors, ";
 
     code += isPrimitive ? "true" : "false";
+    // Byte offset in the class, from DWARF via the type graph (the Flattener
+    // has already added base-class offsets to inherited members)
+    code += ", ";
+    code += std::to_string(m.bitOffset / 8);
     code += "},\n";
   }
   code += "  };\n";
