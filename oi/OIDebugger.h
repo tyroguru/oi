@@ -356,6 +356,12 @@ class OIDebugger {
     uintptr_t timeTakenNs;
     size_t pointersSize;
     size_t pointersCapacity;
+    /*
+     * The probed object, as the JIT code saw it (&t, sizeof(t)): the root
+     * element's VA interval, as OIL's introspect() gives it.
+     */
+    uintptr_t rootAddr;
+    uintptr_t rootSize;
 
     /*
      * Flexible Array Member are not standard in C++, but this is

@@ -69,7 +69,9 @@ using namespace std;
 
 namespace oi::detail {
 
-constexpr int oidMagicId = 0x01DE8;
+// Bump whenever OIDebugger::DataHeader's layout changes, so code compiled
+// (and cached) for an older layout is rejected instead of misread.
+constexpr int oidMagicId = 0x01DE9;
 
 bool OIDebugger::isGlobalDataProbeEnabled(void) const {
   return std::any_of(cbegin(pdata), cend(pdata), [](const auto& r) {
@@ -3205,7 +3207,14 @@ bool OIDebugger::processTargetData() {
         *reinterpret_cast<const oi::exporters::inst::Inst*>(inst->second);
 
     try {
-      IntrospectionResult result{{data.begin(), data.end()}, rootInst};
+      // The root's own interval, as OIL's introspect() gives it
+      std::optional<oi::result::Element::VAInterval> rootInterval;
+      if (dataHeader.rootAddr != 0) {
+        rootInterval = oi::result::Element::VAInterval{
+            .base = dataHeader.rootAddr, .size = dataHeader.rootSize};
+      }
+      IntrospectionResult result{
+          {data.begin(), data.end()}, rootInst, rootInterval};
       std::ostringstream json;
       // As OIL's tests print it: with each element's total size.
       oi::exporters::Json(json).print(oi::result::SizedResult(result));
