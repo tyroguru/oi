@@ -34,6 +34,7 @@ extern "C" {
 #include <elfutils/libdwfl.h>
 #include <fcntl.h>
 #include <gelf.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include "drgn.h"
@@ -173,6 +174,8 @@ struct ModParams {
   GElf_Addr value;
   std::vector<std::pair<uint64_t, uint64_t>>& exeAddrs;
   bool demangle;
+  Dwfl* dwfl;
+  std::optional<pid_t> pid;  // a live target, to resolve IFUNCs in
 };
 
 /**
@@ -193,11 +196,172 @@ struct ModParams {
  * that implementation. JIT code that called the symbol's address directly
  * would run the resolver instead (memset would set nothing).
  *
- * Resolve an IFUNC the way the loader would: look it up with dlsym() in
- * this process, which returns the implementation, and translate its offset
- * into the target's mapping of the same file (for OIL, the target is this
- * process). The two processes must map the same file; otherwise fail.
+ * In a live target the loader has already made that choice, for the target's
+ * CPU and environment, and stored it in GOT slots: read it from there
+ * (resolveIfuncInTarget()). Otherwise resolve it the way the loader would:
+ * look it up with dlsym() in this process and translate its offset into the
+ * target's mapping of the same file (for OIL, the target is this process);
+ * that needs both processes to map the same file.
  */
+
+/* Read a GOT slot from the target and check it holds an implementation */
+static std::optional<GElf_Addr> readIfuncSlot(pid_t pid,
+                                              GElf_Addr slot,
+                                              GElf_Addr resolver,
+                                              Dwarf_Addr modStart,
+                                              Dwarf_Addr modEnd) {
+  uint64_t impl = 0;
+  struct iovec local = {&impl, sizeof(impl)};
+  struct iovec remote = {reinterpret_cast<void*>(slot), sizeof(impl)};
+
+  if (process_vm_readv(pid, &local, 1, &remote, 1, 0) !=
+      static_cast<ssize_t>(sizeof(impl))) {
+    VLOG(1) << "IFUNC slot " << std::hex << slot
+            << " unreadable: " << strerror(errno);
+    return std::nullopt;
+  }
+  /*
+   * A lazily bound slot not yet called still points at its own module's PLT,
+   * so require the implementation to lie in the module defining the symbol.
+   */
+  if (impl < modStart || impl >= modEnd || impl == resolver) {
+    VLOG(1) << "IFUNC slot " << std::hex << slot << " holds " << impl
+            << ", not an implementation";
+    return std::nullopt;
+  }
+  return impl;
+}
+
+/* Visit @mod's RELA relocations of @type until @visit returns a value */
+template <typename F>
+static std::optional<GElf_Addr> forEachRela(Dwfl_Module* mod,
+                                            unsigned type,
+                                            F visit) {
+  Dwarf_Addr bias = 0;
+  Elf* elf = dwfl_module_getelf(mod, &bias);
+  GElf_Ehdr ehdr;
+
+  if (elf == nullptr || gelf_getehdr(elf, &ehdr) == nullptr ||
+      ehdr.e_machine != EM_X86_64) {
+    return std::nullopt;
+  }
+  for (Elf_Scn* scn = elf_nextscn(elf, nullptr); scn != nullptr;
+       scn = elf_nextscn(elf, scn)) {
+    GElf_Shdr shdr;
+    Elf_Data* data;
+
+    if (gelf_getshdr(scn, &shdr) == nullptr || shdr.sh_type != SHT_RELA ||
+        shdr.sh_entsize == 0 ||
+        (data = elf_getdata(scn, nullptr)) == nullptr) {
+      continue;
+    }
+    for (size_t i = 0; i < shdr.sh_size / shdr.sh_entsize; i++) {
+      GElf_Rela rela;
+
+      if (gelf_getrela(data, i, &rela) == nullptr) {
+        break;
+      }
+      if (GELF_R_TYPE(rela.r_info) != type) {
+        continue;
+      }
+      if (auto impl = visit(elf, shdr, bias, rela)) {
+        return impl;
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+struct IfuncSearch {
+  const std::string& symName;
+  GElf_Addr resolver;
+  Dwarf_Addr modStart;
+  Dwarf_Addr modEnd;
+  pid_t pid;
+  std::optional<GElf_Addr> impl;
+};
+
+/* dwfl_getmodules() callback: a GLOB_DAT or JUMP_SLOT slot for the symbol */
+static int ifuncGotCallback(Dwfl_Module* mod,
+                            void** /* userData */,
+                            const char* /* name */,
+                            Dwarf_Addr /* start */,
+                            void* arg) {
+  auto* s = static_cast<IfuncSearch*>(arg);
+
+  for (unsigned type : {R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT}) {
+    s->impl = forEachRela(
+        mod,
+        type,
+        [s](Elf* elf, const GElf_Shdr& shdr, Dwarf_Addr bias,
+            const GElf_Rela& rela) -> std::optional<GElf_Addr> {
+          Elf_Scn* symScn = elf_getscn(elf, shdr.sh_link);
+          Elf_Data* symData = elf_getdata(symScn, nullptr);
+          GElf_Shdr symShdr;
+          GElf_Sym sym;
+
+          if (symData == nullptr || gelf_getshdr(symScn, &symShdr) == nullptr ||
+              gelf_getsym(symData, GELF_R_SYM(rela.r_info), &sym) == nullptr) {
+            return std::nullopt;
+          }
+          const char* name = elf_strptr(elf, symShdr.sh_link, sym.st_name);
+          if (name == nullptr || s->symName != name) {
+            return std::nullopt;
+          }
+          return readIfuncSlot(s->pid, bias + rela.r_offset, s->resolver,
+                               s->modStart, s->modEnd);
+        });
+    if (s->impl) {
+      return DWARF_CB_ABORT;
+    }
+  }
+  return DWARF_CB_OK;
+}
+
+/*
+ * Read the implementation the target's loader chose. libc calls its own
+ * IFUNCs through R_X86_64_IRELATIVE relocations, whose addend is the
+ * resolver's address in the file and which the loader applies at start-up
+ * even under lazy binding, so the defining module's own slot is tried first.
+ * Failing that, any module's GLOB_DAT or JUMP_SLOT slot for the symbol name.
+ */
+static std::optional<GElf_Addr> resolveIfuncInTarget(Dwfl* dwfl,
+                                                     Dwfl_Module* mod,
+                                                     const std::string& symName,
+                                                     GElf_Addr resolver,
+                                                     pid_t pid) {
+  Dwarf_Addr modStart = 0, modEnd = 0, bias = 0;
+
+  dwfl_module_info(
+      mod, nullptr, &modStart, &modEnd, nullptr, nullptr, nullptr, nullptr);
+  if (dwfl_module_getelf(mod, &bias) == nullptr) {
+    return std::nullopt;
+  }
+
+  auto impl = forEachRela(
+      mod,
+      R_X86_64_IRELATIVE,
+      [&](Elf*, const GElf_Shdr&, Dwarf_Addr slotBias,
+          const GElf_Rela& rela) -> std::optional<GElf_Addr> {
+        if (static_cast<GElf_Addr>(rela.r_addend) != resolver - bias) {
+          return std::nullopt;
+        }
+        return readIfuncSlot(
+            pid, slotBias + rela.r_offset, resolver, modStart, modEnd);
+      });
+  if (!impl) {
+    IfuncSearch s = {symName, resolver, modStart, modEnd, pid, std::nullopt};
+
+    dwfl_getmodules(dwfl, ifuncGotCallback, &s, 0);
+    impl = s.impl;
+  }
+  if (impl) {
+    VLOG(1) << "IFUNC " << symName << " resolved in the target to " << std::hex
+            << *impl;
+  }
+  return impl;
+}
+
 static std::optional<GElf_Addr> resolveIfunc(Dwfl_Module* mod,
                                              const std::string& symName) {
   const char* targetFile = nullptr;
@@ -286,6 +450,13 @@ static int moduleCallback(Dwfl_Module* mod,
 
         case STT_GNU_IFUNC:
           if (shndxp != SHN_UNDEF && symName == m->symName) {
+            if (m->pid) {
+              if (auto impl = resolveIfuncInTarget(
+                      m->dwfl, mod, symName, m->value, *m->pid)) {
+                m->value = *impl;
+                return DWARF_CB_ABORT;
+              }
+            }
             if (auto impl = resolveIfunc(mod, symName)) {
               m->value = *impl;
               return DWARF_CB_ABORT;
@@ -537,7 +708,11 @@ std::optional<SymbolInfo> SymbolService::locateSymbol(
                  .sym = {},
                  .value = 0,
                  .exeAddrs = executableAddrs,
-                 .demangle = demangle};
+                 .demangle = demangle,
+                 .dwfl = dwfl,
+                 .pid = std::holds_alternative<pid_t>(target)
+                            ? std::optional<pid_t>{std::get<pid_t>(target)}
+                            : std::nullopt};
 
   dwfl_getmodules(dwfl, moduleCallback, (void*)&m, 0);
 
