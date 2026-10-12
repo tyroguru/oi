@@ -34,7 +34,9 @@
 
 #define C10_USING_CUSTOM_GENERATED_MACROS
 
-constexpr int oidMagicId = 0x01DE8;
+// Bump whenever OIDebugger::DataHeader's layout changes, so code compiled
+// (and cached) for an older layout is rejected instead of misread.
+constexpr int oidMagicId = 0x01DE9;
 
 #include <array>
 

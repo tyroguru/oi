@@ -349,6 +349,8 @@ void FuncGen::DefineTopLevelGetSizeRef(std::string& testCode,
       uintptr_t& timeTakenNs = data[dataSegOffset++];
       size_t& pointersSize = data[dataSegOffset++];
       size_t& pointersCapacity = data[dataSegOffset++];
+      data[dataSegOffset++] = reinterpret_cast<uintptr_t>(&t);
+      data[dataSegOffset++] = sizeof(t);
 
       dataSegOffset *= sizeof(uintptr_t);
       JLOG("%1% @");
@@ -424,6 +426,8 @@ void __attribute__((used, retain)) getSize_%2$016x(const OIInternal::%3%& t)
   uintptr_t& timeTakenNs = data[dataSegOffset++];
   size_t& pointersSize = data[dataSegOffset++];
   size_t& pointersCapacity = data[dataSegOffset++];
+  data[dataSegOffset++] = reinterpret_cast<uintptr_t>(&t);
+  data[dataSegOffset++] = sizeof(t);
   dataSegOffset *= sizeof(uintptr_t);
 
   JLOG("%1% @");
@@ -538,6 +542,8 @@ void FuncGen::DefineTopLevelGetSizeSmartPtr(std::string& testCode,
       uintptr_t& timeTakenNs = data[dataSegOffset++];
       size_t& pointersSize = data[dataSegOffset++];
       size_t& pointersCapacity = data[dataSegOffset++];
+      data[dataSegOffset++] = reinterpret_cast<uintptr_t>(&t);
+      data[dataSegOffset++] = sizeof(t);
 
       dataSegOffset *= sizeof(uintptr_t);
 
