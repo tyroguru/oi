@@ -123,6 +123,11 @@ class OIDebugger {
     return oidShouldExit;
   };
 
+  // Whether any target thread is still attached (not yet detached by us)
+  bool hasAttachedThreads(void) const {
+    return !threadList.empty();
+  }
+
   void setCacheBasePath(std::filesystem::path basePath) {
     if (std::filesystem::exists(basePath.parent_path()) &&
         !std::filesystem::exists(basePath)) {

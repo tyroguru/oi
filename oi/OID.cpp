@@ -495,7 +495,14 @@ static ExitStatus::ExitStatus runScript(
     {  // Resume stopped thread before cleanup
       VLOG(1) << "Resuming stopped threads...";
       metrics::Tracing __("resume_threads");
-      while (oid->processTrap(oidConfig.pid, false) == OIDebugger::OID_CONT) {
+      /*
+       * After a capture the threads may all have been detached already (a
+       * global probe's thread is detached as soon as the capture code
+       * returns), and processTrap() takes an empty thread list to mean the
+       * target died. Only drain while some thread is still attached.
+       */
+      while (oid->hasAttachedThreads() &&
+             oid->processTrap(oidConfig.pid, false) == OIDebugger::OID_CONT) {
       }
     }
 
